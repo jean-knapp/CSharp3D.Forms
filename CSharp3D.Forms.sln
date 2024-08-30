@@ -1,0 +1,36 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.10.35013.160
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CSharp3D.Forms", "CSharp3D.Forms\CSharp3D.Forms.csproj", "{B67A08E2-1BF0-4AA5-9AD4-05792A5D40F0}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Examples", "Examples", "{36A75172-2F6A-4997-9298-4C8E16F5E4A9}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Test", "Test\Test.csproj", "{71ED585C-36DB-4842-BDA0-F390BD2A0386}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B67A08E2-1BF0-4AA5-9AD4-05792A5D40F0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B67A08E2-1BF0-4AA5-9AD4-05792A5D40F0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B67A08E2-1BF0-4AA5-9AD4-05792A5D40F0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B67A08E2-1BF0-4AA5-9AD4-05792A5D40F0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{71ED585C-36DB-4842-BDA0-F390BD2A0386}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{71ED585C-36DB-4842-BDA0-F390BD2A0386}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{71ED585C-36DB-4842-BDA0-F390BD2A0386}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{71ED585C-36DB-4842-BDA0-F390BD2A0386}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{71ED585C-36DB-4842-BDA0-F390BD2A0386} = {36A75172-2F6A-4997-9298-4C8E16F5E4A9}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {66C8E9BE-64CF-4565-86AF-DC9A41EBBD48}
+	EndGlobalSection
+EndGlobal
