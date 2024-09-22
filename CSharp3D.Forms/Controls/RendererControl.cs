@@ -80,6 +80,14 @@ namespace CSharp3D.Forms.Controls
         private bool VSync { get; set; } = true;
 
         /// <summary>
+        /// Whether the refresh of the renderer console is done by an external object. This is useful when there is a thread that continuously
+        /// invalidate this renderer control.
+        /// </summary>
+        [Category("Renderer")]
+        [Description("Whether the refresh of the renderer console is not done by an external object. Set this to false if there is a thread that continuous invalidate this renderer control.")]
+        public bool AutoInvalidate { get; set; } = true;
+
+        /// <summary>
         /// The graphics context for the control.
         /// </summary>
         public IGraphicsContext Context
@@ -178,7 +186,9 @@ namespace CSharp3D.Forms.Controls
             glControl.MakeCurrent();
 
             GL.Viewport(0, 0, glControl.Width, glControl.Height);
-            glControl.Invalidate();
+
+            if (AutoInvalidate)
+                glControl.Invalidate();
         }
 
         /// <summary>
@@ -249,7 +259,9 @@ namespace CSharp3D.Forms.Controls
                 {
                     CameraMove?.Invoke(this, new EventArgs());
                 }
-                glControl.Invalidate();
+
+                if (AutoInvalidate)
+                    glControl.Invalidate();
             }
             else if (Camera.IsMouseDown && !mouseDown)
             {
@@ -284,7 +296,9 @@ namespace CSharp3D.Forms.Controls
         private void GLControl_MouseDown(object sender, MouseEventArgs e)
         {
             Camera.MouseDown(e);
-            glControl.Invalidate();
+
+            if (AutoInvalidate)
+                glControl.Invalidate();
         }
 
         /// <summary>
@@ -295,7 +309,9 @@ namespace CSharp3D.Forms.Controls
         private void GLControl_MouseWheel(object sender, MouseEventArgs e)
         {
             Camera.MouseWheel(e);
-            glControl.Invalidate();
+
+            if (AutoInvalidate)
+                glControl.Invalidate();
         }
     }
 }
