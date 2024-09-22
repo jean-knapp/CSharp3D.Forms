@@ -83,32 +83,15 @@
       <DependentUpon>Settings.settings</DependentUpon>
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
     </Compile>
-    <None Include="Shaders\Generic\geom.glsl">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="Shaders\NormalShaded\frag.glsl">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="Shaders\NormalShaded\vert.glsl">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="Shaders\Wireframe\frag.glsl">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="Shaders\Wireframe\vert.glsl">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="Shaders\Generic\frag.glsl">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="Shaders\Generic\vert.glsl">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\CSharp3D.Forms.SourceEngine\CSharp3D.Forms.SourceEngine.csproj">
+      <Project>{7fde0ed5-6ef2-4b70-892c-66de383f1938}</Project>
+      <Name>CSharp.Forms.SourceEngine</Name>
+    </ProjectReference>
     <ProjectReference Include="..\CSharp3D.Forms\CSharp3D.Forms.csproj">
       <Project>{b67a08e2-1bf0-4aa5-9ad4-05792a5d40f0}</Project>
       <Name>CSharp3D.Forms</Name>

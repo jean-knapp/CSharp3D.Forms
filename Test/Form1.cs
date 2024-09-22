@@ -22,7 +22,7 @@ namespace Test
             lightBulb.ScaleZ = 0.1f;
             scene.Meshes.Add(lightBulb);
 
-            Sprite sprite = new Sprite(new Vector3(0, 0, 4), new Vector3(0, 0, 0));
+            SpriteMesh sprite = new SpriteMesh(new Vector3(0, 0, 4), new Vector3(0, 0, 0));
             sprite.Width = 1;
             sprite.Height = 1;
             sprite.Material = new Material();

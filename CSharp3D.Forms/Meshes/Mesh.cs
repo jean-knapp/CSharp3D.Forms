@@ -287,6 +287,12 @@ namespace CSharp3D.Forms.Meshes
             int specularStrengthLocation = GL.GetUniformLocation(shaderProgram, "uSpecularStrength");
             GL.Uniform1(specularStrengthLocation, Material.SpecularStrength);
 
+            int addSelfLocation = GL.GetUniformLocation(shaderProgram, "uAddSelf");
+            GL.Uniform1(addSelfLocation, Material.AddSelf);
+
+            int overbrightFactorLocation = GL.GetUniformLocation(shaderProgram, "uOverbrightFactor");
+            GL.Uniform1(overbrightFactorLocation, Material.OverbrightFactor);
+
             int colorLocation = GL.GetUniformLocation(shaderProgram, "uBaseColor");
             GL.Uniform4(colorLocation, new Vector4(Material.Color.R / 255f, Material.Color.G / 255f, Material.Color.B / 255f, Material.Alpha));
 

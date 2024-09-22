@@ -114,6 +114,18 @@ namespace CSharp3D.Forms.Engine
         [Description("The specular reflection map.")]
         public Texture Specular { get; set; } = null;
 
+        /// <summary>
+        /// AddSelf
+        /// </summary>
+        [Category("Sprite")]
+        public float AddSelf { get; set; } = 0;
+
+        /// <summary>
+        /// OverbrightFactor
+        /// </summary>
+        [Category("Sprite")]
+        public float OverbrightFactor { get; set; } = 1;
+
         [Browsable(false)]
         public Shader Shader { get; private set; } = null;
 
