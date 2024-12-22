@@ -1,4 +1,7 @@
-﻿using OpenTK;
+﻿using CSharp3D.Forms.Controls;
+using CSharp3D.Forms.Engine.Helpers;
+using CSharp3D.Forms.Utils;
+using OpenTK;
 using System.ComponentModel;
 using System.Windows.Forms;
 
@@ -100,6 +103,11 @@ namespace CSharp3D.Forms.Cameras
         public virtual void MouseWheel(MouseEventArgs e)
         {
 
+        }
+
+        public virtual Ray GetPickingRay(RendererControl control, System.Windows.Forms.MouseEventArgs mouseEventArgs)
+        {
+            return null;
         }
     }
 }

@@ -29,7 +29,7 @@ namespace CSharp3D.Forms.Engine
         /// The color to be applied on the material. White means no change.
         /// </summary>
         [Category("Adjustment")]
-        [Description("The color to be applied on the material. White means no change.")]
+        [Description("The color to be applied on the material. White means no change. The alpha is ignored.")]
         public Color Color { get; set; } = Color.White;
 
         private float _alpha = 1.0f;

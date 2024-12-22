@@ -61,6 +61,7 @@
     <Compile Include="Cameras\OrbitalCamera.cs">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="Controls\MeshEventArgs.cs" />
     <Compile Include="Controls\RendererControl.cs">
       <SubType>UserControl</SubType>
     </Compile>
@@ -110,6 +111,7 @@
     </Compile>
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Utils\MouseHelper.cs" />
+    <Compile Include="Utils\Ray.cs" />
     <Compile Include="Utils\UVTypeConverter.cs" />
     <Compile Include="Utils\Vector4TypeConverter.cs" />
     <Compile Include="Utils\Vector3TypeConverter.cs" />

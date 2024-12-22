@@ -85,7 +85,7 @@ namespace CSharp3D.Forms.Meshes
         /// Get the vertex array for the cuboid mesh
         /// </summary>
         /// <returns> The vertex array </returns>
-        public override float[] GetVertexArray()
+        public override float[] GetGLVertexArray()
         {
             // Positions (gl_x,gl_y,gl_z) , Normals (nx, ny, nz), Texture Coords (u, v)
             float[] vertexArray = new float[vertices.Length * 8];

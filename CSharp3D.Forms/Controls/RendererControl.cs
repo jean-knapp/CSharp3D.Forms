@@ -1,5 +1,6 @@
 ﻿using CSharp3D.Forms.Cameras;
 using CSharp3D.Forms.Engine;
+using CSharp3D.Forms.Engine.Helpers;
 using CSharp3D.Forms.Exceptions;
 using CSharp3D.Forms.Meshes;
 using CSharp3D.Forms.Utils;
@@ -296,6 +297,8 @@ namespace CSharp3D.Forms.Controls
         private void GLControl_MouseDown(object sender, MouseEventArgs e)
         {
             Camera.MouseDown(e);
+
+            Scene.PickMesh(this, Camera, e);
 
             if (AutoInvalidate)
                 glControl.Invalidate();

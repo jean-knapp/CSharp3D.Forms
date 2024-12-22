@@ -56,7 +56,7 @@ namespace CSharp3D.Forms.Meshes
         /// Get the vertex array for the sprite
         /// </summary>
         /// <returns> The vertex array </returns>
-        public override float[] GetVertexArray()
+        public override float[] GetGLVertexArray()
         {
             // Face east (x axis
             Vertex[] vertices = new Vertex[]

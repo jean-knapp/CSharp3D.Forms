@@ -34,19 +34,19 @@ namespace CSharp3D.Forms.Meshes
         /// Get the vertex array of the mesh.
         /// </summary>
         /// <returns> The vertex array of the mesh. </returns>
-        public override float[] GetVertexArray()
+        public override float[] GetGLVertexArray()
         {
             // Cuboid vertex data with positions and texture coordinates
 
             // Positions (-y, z, -x) , Normals (nx, ny, nz), Texture Coords (u, v)
             float[] result = new float[Vertices.Length * 8];
 
-            // Vertex data should be stored as -y, z, -x, u, v
+            // Vertex data should be stored as world x,y,z, and u, v
             for (int i = 0; i < Vertices.Length; i++)
             {
-                result[i * 8] = Vertices[i].X;
+                result[i * 8] = -Vertices[i].Y;
                 result[i * 8 + 1] = Vertices[i].Z;
-                result[i * 8 + 2] = Vertices[i].Y;
+                result[i * 8 + 2] = -Vertices[i].X;
                 result[i * 8 + 3] = 0;
                 result[i * 8 + 4] = 0;
                 result[i * 8 + 5] = 0;

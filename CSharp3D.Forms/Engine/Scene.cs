@@ -1,8 +1,15 @@
-﻿using CSharp3D.Forms.Lights;
+﻿using CSharp3D.Forms.Cameras;
+using CSharp3D.Forms.Controls;
+using CSharp3D.Forms.Engine.Helpers;
+using CSharp3D.Forms.Lights;
 using CSharp3D.Forms.Meshes;
+using CSharp3D.Forms.Utils;
+using OpenTK;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
+using System.Windows.Forms;
 
 namespace CSharp3D.Forms.Engine
 {
@@ -12,6 +19,14 @@ namespace CSharp3D.Forms.Engine
     [Description("Contains all the objects in a scene. Can be used by multiple RendererControls.")]
     public class Scene : Component
     {
+        [Category("Interaction")]
+        [Description("Occurs when a mesh is picked by the user.")]
+        public event EventHandler<MeshEventArgs> OnMeshClicked;
+
+        [Category("Interaction")]
+        [Description("Occurs when the user clicks on the renderer control and no mesh was selected.")]
+        public event EventHandler<EventArgs> OnVoidClicked;
+
         /// <summary>
         /// The directory where the shaders are located, relative to the executable directory.
         /// </summary>
@@ -82,6 +97,53 @@ namespace CSharp3D.Forms.Engine
             {
                 LoadShader(shaderName);
                 return Shaders[shaderName];
+            }
+        }
+
+        /// <summary>
+        /// Create a picking ray and test against the scene's meshes using their bounding box.
+        /// </summary>
+        /// <param name="mouseEventArgs">The event arguments</param>
+        internal void PickMesh(RendererControl control, Camera camera, MouseEventArgs mouseEventArgs)
+        {
+            // Now we have a "picking ray" in world space:
+            Ray pickingRay = camera.GetPickingRay(control, mouseEventArgs);
+
+            float closestT = float.MaxValue;
+            Mesh pickedMesh = null;
+
+            foreach (Mesh mesh in Meshes)
+            {
+                if (!mesh.Clickable)
+                    continue;
+
+                if (pickingRay.RayIntersectsAABB(
+                        pickingRay.Origin,
+                        pickingRay.Direction,
+                        mesh.BoxMin,
+                        mesh.BoxMax,
+                        out float tNear))
+                {
+                    // tNear is how "far" along the ray the intersection occurred
+                    if (tNear < closestT && tNear >= 0)
+                    {
+                        closestT = tNear;
+                        pickedMesh = mesh;
+                    }
+                }
+            }
+
+            // If something was picked
+            if (pickedMesh != null)
+            {
+                // For example, highlight or select
+                Console.WriteLine("Clicked on mesh: " + pickedMesh);
+                OnMeshClicked?.Invoke(control, new MeshEventArgs(pickedMesh));
+            }
+            else
+            {
+                Console.WriteLine("Clicked on nothing.");
+                OnVoidClicked?.Invoke(control, mouseEventArgs);
             }
         }
     }

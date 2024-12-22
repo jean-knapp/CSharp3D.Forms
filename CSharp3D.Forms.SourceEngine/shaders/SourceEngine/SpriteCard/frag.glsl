@@ -25,7 +25,7 @@ void main()
         texColor.rgb *= 2 * uBaseColor.rgb;
     }
 
-    FragColor = texColor;
+    FragColor = vec4(texColor.rgb * uBaseColor.rgb * uBaseColor.a);
 
     // Calculate the final fragment color by combining diffuse, ambient, and specular components
     //FragColor = vec4(texColor.rgb, texColor.a * uBaseColor.a);

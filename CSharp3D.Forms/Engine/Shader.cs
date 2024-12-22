@@ -60,11 +60,11 @@ namespace CSharp3D.Forms.Engine
         /// <exception cref="FileNotFoundException"></exception>
         private void LoadShader(object context, Scene scene)
         {
-            string vertexShaderPath = Path.Combine(scene.ShaderDirectory, Name + "/vert.glsl");
-            string geometryShaderPath = Path.Combine(scene.ShaderDirectory, Name + "/geom.glsl");
-            string fragmentShaderPath = Path.Combine(scene.ShaderDirectory, Name + "/frag.glsl");
+            string vertexShaderPath = Path.Combine(new string[] { AppDomain.CurrentDomain.BaseDirectory, scene.ShaderDirectory, Name + "/vert.glsl" });
+            string geometryShaderPath = Path.Combine(new string[] { AppDomain.CurrentDomain.BaseDirectory, scene.ShaderDirectory, Name + "/geom.glsl" });
+            string fragmentShaderPath = Path.Combine(new string[] { AppDomain.CurrentDomain.BaseDirectory, scene.ShaderDirectory, Name + "/frag.glsl" });
 
-            if (!File.Exists(vertexShaderPath))
+            if (!File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, vertexShaderPath)))
                 throw new FileNotFoundException($"Shader file not found: {vertexShaderPath}");
 
             if (!File.Exists(fragmentShaderPath))

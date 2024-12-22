@@ -36,7 +36,7 @@ namespace CSharp3D.Forms.Meshes
         /// Get the vertex array for the grid
         /// </summary>
         /// <returns> The vertex array </returns>
-        public override float[] GetVertexArray()
+        public override float[] GetGLVertexArray()
         {
             int length = (int)Math.Max(Size / LineInterval, 2);
             Vertices = new Vector3[4 * (length + 1)];
@@ -67,7 +67,7 @@ namespace CSharp3D.Forms.Meshes
             Vertices[2 * (2 * length / 2 + 1 + 2 * length / 2) + 0] = new Vector3(-length / 2 * LineInterval, length / 2 * LineInterval, 0);
             Vertices[2 * (2 * length / 2 + 1 + 2 * length / 2) + 1] = new Vector3(length / 2 * LineInterval, length / 2 * LineInterval, 0);
 
-            return base.GetVertexArray();
+            return base.GetGLVertexArray();
         }
     }
 }

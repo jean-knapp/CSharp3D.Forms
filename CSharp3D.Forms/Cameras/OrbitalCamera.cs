@@ -1,4 +1,4 @@
-﻿using CSharp3D.Forms.Engine;
+﻿using CSharp3D.Forms.Controls;
 using CSharp3D.Forms.Engine.Helpers;
 using CSharp3D.Forms.Utils;
 using OpenTK;
@@ -187,6 +187,57 @@ namespace CSharp3D.Forms.Cameras
             base.MouseWheel(e);
 
             Distance = (float)(Distance * Math.Pow(2, -e.Delta / 256f));
+        }
+
+        public override Ray GetPickingRay(RendererControl control, MouseEventArgs mouseEventArgs)
+        {
+            // 1. Convert 2D mouse coords to Normalized Device Coordinates (NDC)
+            float mouseX = mouseEventArgs.X;
+            float mouseY = control.Height - mouseEventArgs.Y; // Because top-left is (0,0) in WinForms
+            float ndcX = (2.0f * mouseX) / control.Width - 1.0f;
+            float ndcY = (2.0f * mouseY) / control.Height - 1.0f;
+
+            // We'll pick from the "near plane" or "clip space" -1 in Z.
+            // Or, if you prefer, use +1.0f if you'd like the far plane. 
+            // It's a matter of style (some prefer near plane = -1.0f).
+            float ndcZ = -1.0f;
+
+            // 2. Get your matrices
+            var projectionMatrix = GetProjectionMatrix(control.Width, control.Height);
+            var viewMatrix = GetViewMatrix(control.Width, control.Height);
+
+            // 3. Unproject from Clip Space -> Eye Space
+            //    We'll set W=1 for now, then fix it in Eye Space.
+            Vector4 rayClip = new Vector4(ndcX, ndcY, ndcZ, 1.0f);
+
+            // Invert the Projection
+            Matrix4 invProjection = Matrix4.Invert(projectionMatrix);
+
+            // Transform from Clip Space to Eye Space
+            Vector4 rayEye = Vector4.Transform(rayClip, invProjection);
+
+            // In Eye Space, the ray direction has Z=-1, W=0
+            // so we keep the X,Y from the transform, but force Z=-1, W=0
+            rayEye.Z = -1.0f;
+            rayEye.W = 0.0f;
+
+            // 4. Convert from Eye Space -> World Space
+            Matrix4 invView = Matrix4.Invert(viewMatrix);
+            Vector4 rayWorld4 = Vector4.Transform(rayEye, invView);
+
+            // Make a Vector3 for direction, and normalize
+            Vector3 rayDirection = new Vector3(rayWorld4.X, rayWorld4.Y, rayWorld4.Z);
+            rayDirection.Normalize();
+            rayDirection = VectorOrientation.ToWorld(rayDirection);
+
+            // 5. Get the camera position as the ray origin
+            //    (assuming an OrbitalCamera or similar)
+            Vector3 cameraPosition = GetLocation(control.Width, control.Height);
+
+            // Now we have a "picking ray" in world space:
+            Ray pickingRay = new Ray(cameraPosition, rayDirection);
+
+            return pickingRay;
         }
     }
 }

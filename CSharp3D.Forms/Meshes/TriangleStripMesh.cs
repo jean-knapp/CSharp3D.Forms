@@ -27,7 +27,7 @@ namespace CSharp3D.Forms.Meshes
         /// Get the vertex array of the triangle strip.
         /// </summary>
         /// <returns> The vertex array of the triangle strip. </returns>
-        public override float[] GetVertexArray()
+        public override float[] GetGLVertexArray()
         {
             // Cuboid vertex data with positions and texture coordinates
 

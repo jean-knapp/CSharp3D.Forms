@@ -57,7 +57,7 @@ namespace CSharp3D.Forms.Meshes
         /// <summary>
         /// X is the east direction, Y is the north direction, Z is the up direction.
         /// </summary>
-        [Category("Position")]
+        [Category("Mesh")]
         [TypeConverter(typeof(Vector3TypeConverter))]
         [Description("The position of the origin of the mesh, in World units (X, Y, Z).")]
         public Vector3 Location { get; set; }
@@ -65,16 +65,20 @@ namespace CSharp3D.Forms.Meshes
         /// <summary>
         /// X is the roll clockwise, Y is the pitch down, Z is the yaw counter-clockwise.
         /// </summary>
-        [Category("Position")]
+        [Category("Mesh")]
         [TypeConverter(typeof(Vector3TypeConverter))]
         [Description("The rotation of the mesh, in degrees (Roll, Pitch, Yaw).")]
         public Vector3 Rotation { get; set; }
 
-        [Category("Material")]
+        [Category("Mesh")]
         [Description("The material of the mesh.")]
         public Material Material { get; set; } = null;
 
         protected PrimitiveType PrimitiveType { get; set; } = PrimitiveType.Triangles;
+
+        [Category("Mesh")]
+        [Description("Whether the mesh can be picked by a mouse click.")]
+        public bool Clickable { get; set; } = false;
 
         public Mesh()
         {
@@ -120,7 +124,7 @@ namespace CSharp3D.Forms.Meshes
         /// Get the vertex array of the mesh.
         /// </summary>
         /// <returns> The vertex array of the mesh. </returns>
-        public virtual float[] GetVertexArray()
+        public virtual float[] GetGLVertexArray()
         {
             // Vertex data with positions and texture coordinates
             float[] vertices = { };
@@ -211,8 +215,10 @@ namespace CSharp3D.Forms.Meshes
         public void SetupMesh(object context)
         {
             // Cube vertex data with positions and texture coordinates
-            float[] vertices = GetVertexArray();
+            float[] vertices = GetGLVertexArray();
             uint[] indices = GetIndexArray();
+
+            ComputeBoundingBox(this);
 
             vao[context] = GL.GenVertexArray();
             vbo[context] = GL.GenBuffer();
@@ -346,6 +352,53 @@ namespace CSharp3D.Forms.Meshes
         {
             Vector3 meshPosition = Location; // Assuming Location is the mesh's world position
             return (meshPosition - cameraPosition).Length;
+        }
+
+        public Vector3 BoxMin, BoxMax;  // store in your Mesh class
+
+        private void ComputeBoundingBox(Mesh mesh)
+        {
+            float[] vertices = mesh.GetGLVertexArray();
+            // Typically, each vertex has (posX, posY, posZ, normalX, normalY, normalZ, texU, texV)
+            // so that's 8 floats per vertex. The positions are at indices [0,1,2].
+            // 
+            // If your mesh has scaling/rotation/translation, you can:
+            //   1) get the local positions first,
+            //   2) multiply them by mesh.GetModelMatrix(...) to get world positions,
+            // or  3) if you prefer, compute an oriented bounding box (OBB) for the local vertices.
+            // For a simpler AABB in world space, do something like:
+
+            Matrix4 modelMatrix = mesh.GetModelMatrix(Matrix4.Identity);
+            // modelMatrix includes your translation (Location), rotation, etc.
+
+            // Initialize min & max
+            Vector3 min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            Vector3 max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+
+            int vertexCount = vertices.Length / 8;
+            for (int i = 0; i < vertexCount; i++)
+            {
+                // local vertex position
+                float lx = vertices[i * 8 + 0];
+                float ly = vertices[i * 8 + 1];
+                float lz = vertices[i * 8 + 2];
+                Vector4 localPos = new Vector4(lx, ly, lz, 1.0f);
+
+                // transform to world space
+                Vector4 worldPos = Vector4.Transform(localPos, modelMatrix);
+
+                // update min & max
+                if (worldPos.X < min.X) min.X = worldPos.X;
+                if (worldPos.Y < min.Y) min.Y = worldPos.Y;
+                if (worldPos.Z < min.Z) min.Z = worldPos.Z;
+
+                if (worldPos.X > max.X) max.X = worldPos.X;
+                if (worldPos.Y > max.Y) max.Y = worldPos.Y;
+                if (worldPos.Z > max.Z) max.Z = worldPos.Z;
+            }
+
+            mesh.BoxMin = VectorOrientation.ToWorld(min);
+            mesh.BoxMax = VectorOrientation.ToWorld(max);
         }
     }
 }
