@@ -47,10 +47,10 @@ namespace CSharp3D.Forms.Cameras
             Distance = distance;
         }
 
-        public override Matrix4 GetViewMatrix(int controlWidth, int controlHeight)
+        public override Matrix4 GetViewMatrix(RendererControl rendererControl)
         {
             Vector3 location = VectorOrientation.ToGL(new Vector3(-Distance, 0, 0)) * -1;
-            Vector3 rotation = VectorOrientation.ToGL(GetRotation(controlWidth, controlHeight)) * -1 * MathHelper.Pi / 180f;
+            Vector3 rotation = VectorOrientation.ToGL(GetRotation(rendererControl)) * -1 * MathHelper.Pi / 180f;
 
             Quaternion qPitch = Quaternion.FromAxisAngle(Vector3.UnitX, rotation.X);
             Quaternion qYaw = Quaternion.FromAxisAngle(Vector3.UnitY, rotation.Y);
@@ -65,11 +65,11 @@ namespace CSharp3D.Forms.Cameras
         /// <param name="controlWidth"> The width of the control. </param>
         /// <param name="controlHeight"> The height of the control. </param>
         /// <returns> The rotation of the camera, in degrees (Roll, Pitch, Yaw). </returns>
-        public Vector3 GetRotation(int controlWidth, int controlHeight)
+        public Vector3 GetRotation(RendererControl rendererControl)
         {
             var mouseDelta = GetMouseDelta();
             Vector3 rotation = Rotation;
-            rotation = rotation + new Vector3(0, 2 * mouseDelta.Y * FOV / controlHeight, 2 * mouseDelta.X * FOV / controlWidth);
+            rotation = rotation + new Vector3(0, 2 * mouseDelta.Y * FOV / rendererControl.Height, 2 * mouseDelta.X * FOV / rendererControl.Width);
 
             if (!ClampVertically)
             {
@@ -78,78 +78,16 @@ namespace CSharp3D.Forms.Cameras
 
             rotation.X = (rotation.X + 180) % 360 - 180;
             rotation.Y = (rotation.Y + 180) % 360 - 180;
-            rotation.Z = (rotation.Z + 180) % 360 - 180;          
+            rotation.Z = (rotation.Z + 180) % 360 - 180;
+
+            // Recenter mouse
+            var center = rendererControl.GetCenterPointInScreen();
+            var diffX = Cursor.Position.X - center.X;
+            var diffY = Cursor.Position.Y - center.Y;
+            mouseStartLocation = new Vector2(mouseStartLocation.X - diffX, mouseStartLocation.Y - diffY);
+            Cursor.Position = center;
 
             return rotation;
-        }
-
-        /// <summary>
-        /// Gets the rotation of the camera, in degrees (Roll, Pitch, Yaw).
-        /// </summary>
-        /// <param name="viewMatrix"> The view matrix of the camera. </param>
-        /// <returns> The rotation of the camera, in degrees (Roll, Pitch, Yaw). </returns>
-        public static Vector3 GetRotation(Matrix4 viewMatrix)
-        {
-            // Step 2: Extract the upper-left 3x3 matrix (rotation part)
-            Matrix3 rotationMatrix = new Matrix3(
-                new Vector3(viewMatrix.M11, viewMatrix.M12, viewMatrix.M13),
-                new Vector3(viewMatrix.M21, viewMatrix.M22, viewMatrix.M23),
-                new Vector3(viewMatrix.M31, viewMatrix.M32, viewMatrix.M33)
-            );
-
-            double theta1 = Math.Asin(viewMatrix.M23);
-            double psi1 = 0;
-            double phi1 = 0;
-
-            if (Math.Abs(rotationMatrix.M23) == 1)
-            {
-                psi1 = Math.Atan2(viewMatrix.M31, -CopySign(1, rotationMatrix.M23) * viewMatrix.M32);
-            }
-            else
-            {
-                psi1 = -Math.Atan2(viewMatrix.M13 / Math.Cos(theta1), viewMatrix.M33 / Math.Cos(theta1));
-                phi1 = -Math.Atan2(viewMatrix.M21 / Math.Cos(theta1), viewMatrix.M22 / Math.Cos(theta1));
-            }
-
-            var rotation = new Vector3((float)theta1, (float)psi1, (float)phi1) * new Matrix3(
-                new Vector3(0, -1, 0),
-                new Vector3(0, 0, 1),
-                new Vector3(-1, 0, 0)
-            ) * -1 * 180 / MathHelper.Pi;
-
-            return rotation;
-        }
-
-        /// <summary>
-        /// Gets the distance from the camera to the origin, in World units.
-        /// </summary>
-        /// <param name="viewMatrix"> The view matrix of the camera. </param>
-        /// <returns> The distance from the camera to the origin, in World units. </returns>
-        public static float GetDistance(Matrix4 viewMatrix)
-        {
-            return -viewMatrix.M43;
-        }
-
-        /// <summary>
-        /// Gets the location of the camera, in World units (X, Y, Z).
-        /// </summary>
-        /// <param name="viewMatrix"> The view matrix of the camera. </param>
-        /// <returns> The location of the camera, in World units (X, Y, Z). </returns>
-        public static Vector3 GetLocation(Matrix4 viewMatrix)
-        {
-            Vector3 rotation = VectorOrientation.ToGL(GetRotation(viewMatrix)) * MathHelper.Pi / 180f;
-            float distance = GetDistance(viewMatrix);
-
-            Matrix4 yawMatrix = Matrix4.CreateRotationZ(rotation.Z);
-            Matrix4 pitchMatrix = Matrix4.CreateRotationX(rotation.X);
-            Matrix4 rollMatrix = Matrix4.CreateRotationY(rotation.Y);
-
-            Matrix4 rotationMatrix = pitchMatrix * yawMatrix * rollMatrix;
-
-            Vector3 forward = new Vector3(0, 0, distance);
-            Vector3 position = VectorOrientation.ToWorld(Vector3.Transform(forward, new Matrix3(rotationMatrix)));
-
-            return position;
         }
 
         /// <summary>
@@ -158,9 +96,9 @@ namespace CSharp3D.Forms.Cameras
         /// <param name="controlWidth"> The width of the control. </param>
         /// <param name="controlHeight"> The height of the control. </param>
         /// <returns> The position of the camera, in World units (X, Y, Z). </returns>
-        public Vector3 GetLocation(int controlWidth, int controlHeight)
+        public override Vector3 GetLocation(RendererControl rendererControl)
         {
-            var rot = GetRotation(controlWidth, controlHeight);
+            var rot = GetRotation(rendererControl);
 
             float x = Distance * (float)Math.Cos((rot.Z + 180) * Math.PI / 180f) * (float)Math.Cos((rot.Y) * Math.PI / 180f);
             float y = Distance * (float)Math.Sin((rot.Z + 180) * Math.PI / 180f) * (float)Math.Cos((rot.Y) * Math.PI / 180f);
@@ -170,16 +108,11 @@ namespace CSharp3D.Forms.Cameras
             return new Vector3(x, y, z);
         }
 
-        private static float CopySign(float size, float sign)
+        public override void MouseUp(RendererControl rendererControl)
         {
-            return Math.Sign(sign) == -1 ? -Math.Abs(size) : Math.Abs(size);
-        }
+            Rotation = GetRotation(rendererControl);
 
-        public override void MouseUp(int controlWidth, int controlHeight)
-        {
-            Rotation = GetRotation(controlWidth, controlHeight);
-
-            base.MouseUp(controlWidth, controlHeight);
+            base.MouseUp(rendererControl);
         }
 
         public override void MouseWheel(MouseEventArgs e)
@@ -187,57 +120,6 @@ namespace CSharp3D.Forms.Cameras
             base.MouseWheel(e);
 
             Distance = (float)(Distance * Math.Pow(2, -e.Delta / 256f));
-        }
-
-        public override Ray GetPickingRay(RendererControl control, MouseEventArgs mouseEventArgs)
-        {
-            // 1. Convert 2D mouse coords to Normalized Device Coordinates (NDC)
-            float mouseX = mouseEventArgs.X;
-            float mouseY = control.Height - mouseEventArgs.Y; // Because top-left is (0,0) in WinForms
-            float ndcX = (2.0f * mouseX) / control.Width - 1.0f;
-            float ndcY = (2.0f * mouseY) / control.Height - 1.0f;
-
-            // We'll pick from the "near plane" or "clip space" -1 in Z.
-            // Or, if you prefer, use +1.0f if you'd like the far plane. 
-            // It's a matter of style (some prefer near plane = -1.0f).
-            float ndcZ = -1.0f;
-
-            // 2. Get your matrices
-            var projectionMatrix = GetProjectionMatrix(control.Width, control.Height);
-            var viewMatrix = GetViewMatrix(control.Width, control.Height);
-
-            // 3. Unproject from Clip Space -> Eye Space
-            //    We'll set W=1 for now, then fix it in Eye Space.
-            Vector4 rayClip = new Vector4(ndcX, ndcY, ndcZ, 1.0f);
-
-            // Invert the Projection
-            Matrix4 invProjection = Matrix4.Invert(projectionMatrix);
-
-            // Transform from Clip Space to Eye Space
-            Vector4 rayEye = Vector4.Transform(rayClip, invProjection);
-
-            // In Eye Space, the ray direction has Z=-1, W=0
-            // so we keep the X,Y from the transform, but force Z=-1, W=0
-            rayEye.Z = -1.0f;
-            rayEye.W = 0.0f;
-
-            // 4. Convert from Eye Space -> World Space
-            Matrix4 invView = Matrix4.Invert(viewMatrix);
-            Vector4 rayWorld4 = Vector4.Transform(rayEye, invView);
-
-            // Make a Vector3 for direction, and normalize
-            Vector3 rayDirection = new Vector3(rayWorld4.X, rayWorld4.Y, rayWorld4.Z);
-            rayDirection.Normalize();
-            rayDirection = VectorOrientation.ToWorld(rayDirection);
-
-            // 5. Get the camera position as the ray origin
-            //    (assuming an OrbitalCamera or similar)
-            Vector3 cameraPosition = GetLocation(control.Width, control.Height);
-
-            // Now we have a "picking ray" in world space:
-            Ray pickingRay = new Ray(cameraPosition, rayDirection);
-
-            return pickingRay;
         }
     }
 }

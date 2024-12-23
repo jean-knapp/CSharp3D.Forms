@@ -149,7 +149,7 @@ namespace CSharp3D.Forms.Meshes
         /// <returns> The model matrix </returns>
         public override Matrix4 GetModelMatrix(Matrix4 viewMatrix)
         {
-            var rotation = OrbitalCamera.GetRotation(viewMatrix);
+            var rotation = Camera.GetRotation(viewMatrix);
 
             Rotation = new Vector3(Rotation.X, (ZAxisRotationOnly ? Rotation.Y : -rotation.Y), rotation.Z + 180);
 

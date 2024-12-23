@@ -323,7 +323,7 @@ namespace CSharp3D.Forms.Meshes
             }
 
             int cameraPositionLocation = GL.GetUniformLocation(shaderProgram, "uCameraPosition");
-            var cameraLocation = OrbitalCamera.GetLocation(view);
+            var cameraLocation = Camera.GetLocation(view);
             GL.Uniform3(cameraPositionLocation, VectorOrientation.ToGL(cameraLocation));
 
             // Set the projection matrix

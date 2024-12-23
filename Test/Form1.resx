@@ -118,7 +118,7 @@
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
   <metadata name="orbitalCamera.TrayLocation" type="System.Drawing.Point, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
-    <value>120, 17</value>
+    <value>17, 17</value>
   </metadata>
   <data name="orbitalCamera.Rotation" mimetype="application/x-microsoft.net.object.binary.base64">
     <value>
@@ -128,10 +128,27 @@
 </value>
   </data>
   <metadata name="scene.TrayLocation" type="System.Drawing.Point, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
-    <value>249, 17</value>
+    <value>146, 17</value>
   </metadata>
+  <metadata name="freeLookCamera1.TrayLocation" type="System.Drawing.Point, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
+    <value>569, 17</value>
+  </metadata>
+  <data name="freeLookCamera1.Location" mimetype="application/x-microsoft.net.object.binary.base64">
+    <value>
+        AAEAAAD/////AQAAAAAAAAAMAgAAAElPcGVuVEssIFZlcnNpb249My4zLjMuMCwgQ3VsdHVyZT1uZXV0
+        cmFsLCBQdWJsaWNLZXlUb2tlbj1iYWQxOTlmZTg0ZWIzZGY0BQEAAAAOT3BlblRLLlZlY3RvcjMDAAAA
+        AVgBWQFaAAAACwsLAgAAAAAAgMAAAAAAAACAPws=
+</value>
+  </data>
+  <data name="freeLookCamera1.Rotation" mimetype="application/x-microsoft.net.object.binary.base64">
+    <value>
+        AAEAAAD/////AQAAAAAAAAAMAgAAAElPcGVuVEssIFZlcnNpb249My4zLjMuMCwgQ3VsdHVyZT1uZXV0
+        cmFsLCBQdWJsaWNLZXlUb2tlbj1iYWQxOTlmZTg0ZWIzZGY0BQEAAAAOT3BlblRLLlZlY3RvcjMDAAAA
+        AVgBWQFaAAAACwsLAgAAAAAAAAAAAAAAAAAAAAs=
+</value>
+  </data>
   <metadata name="cuboidMesh1.TrayLocation" type="System.Drawing.Point, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
-    <value>529, 17</value>
+    <value>230, 17</value>
   </metadata>
   <data name="cuboidMesh1.Location" mimetype="application/x-microsoft.net.object.binary.base64">
     <value>
@@ -141,7 +158,7 @@
 </value>
   </data>
   <metadata name="material1.TrayLocation" type="System.Drawing.Point, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
-    <value>655, 17</value>
+    <value>356, 17</value>
   </metadata>
   <data name="cuboidMesh1.Rotation" mimetype="application/x-microsoft.net.object.binary.base64">
     <value>
@@ -151,7 +168,7 @@
 </value>
   </data>
   <metadata name="gridMesh1.TrayLocation" type="System.Drawing.Point, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
-    <value>758, 17</value>
+    <value>459, 17</value>
   </metadata>
   <data name="gridMesh1.Location" mimetype="application/x-microsoft.net.object.binary.base64">
     <value>

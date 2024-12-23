@@ -103,6 +103,9 @@ namespace CSharp3D.Forms.Controls
         {
             InitializeComponent();
 
+            // Let this control be focusable.
+            this.TabStop = true;
+
             glControl = new GLControl(new GraphicsMode(32, Depth, Stencil, Samples, 0, (DoubleBuffer ? 2 : 1)));
             glControl.VSync = VSync;
             glControl.Dock = DockStyle.Fill;
@@ -137,6 +140,8 @@ namespace CSharp3D.Forms.Controls
                 glControl.Resize += GLControl_Resize;
                 glControl.MouseDown += GLControl_MouseDown;
                 glControl.MouseWheel += GLControl_MouseWheel;
+                glControl.KeyDown += GlControl_KeyDown;
+                glControl.KeyUp += GlControl_KeyUp;
             }
         }
 
@@ -192,6 +197,8 @@ namespace CSharp3D.Forms.Controls
                 glControl.Invalidate();
         }
 
+        private double lastFrameTime = 0;
+
         /// <summary>
         /// Paint the GLControl.
         /// </summary>
@@ -200,6 +207,16 @@ namespace CSharp3D.Forms.Controls
         /// <exception cref="CameraNotSetException"> Exception thrown when the camera is not set in a RendererControl </exception>
         private void GLControl_Paint(object sender, PaintEventArgs e)
         {
+            double currentTime = (double)Environment.TickCount / 1000.0;
+            double deltaTime = currentTime - lastFrameTime;
+            lastFrameTime = currentTime;
+
+            // This is a workaround so we skip the first deltatime update if it's been too long since the last paint.
+            if (deltaTime > 0.05)
+            {
+                deltaTime = 0;
+            }
+
             if (this.DesignMode)
             {
                 // Use GDI+ to paint the background color in design mode
@@ -219,7 +236,7 @@ namespace CSharp3D.Forms.Controls
 
             // Set the projection and view matrices
             Matrix4 projection = Camera.GetProjectionMatrix(glControl.Width, glControl.Height);
-            Matrix4 view = Camera.GetViewMatrix(glControl.Width, glControl.Height);
+            Matrix4 view = Camera.GetViewMatrix(this);
 
             // Draw opaque meshes meshes
             List<Mesh> transparentMeshes = new List<Mesh>();
@@ -239,21 +256,26 @@ namespace CSharp3D.Forms.Controls
             // Draw translucent meshes
             GL.DepthMask(false);
 
-            Vector3 cameraPosition = (Camera as OrbitalCamera).GetLocation(glControl.Width, glControl.Height); // Correctly calculate camera position
-
-            var sortedTransparentMeshes = transparentMeshes
-                .OrderByDescending(mesh => mesh.GetDistanceFromCamera(cameraPosition))
-                .ToList();
-
-            foreach (Mesh mesh in sortedTransparentMeshes)
+            if (Camera is OrbitalCamera)
             {
-                mesh.DrawMesh(Context, Scene, projection, view);
+                Vector3 cameraPosition = (Camera as OrbitalCamera).GetLocation(this); // Correctly calculate camera position
+
+                var sortedTransparentMeshes = transparentMeshes
+                    .OrderByDescending(mesh => mesh.GetDistanceFromCamera(cameraPosition))
+                    .ToList();
+
+                foreach (Mesh mesh in sortedTransparentMeshes)
+                {
+                    mesh.DrawMesh(Context, Scene, projection, view);
+                }
             }
 
             GL.DepthMask(true);
 
+            bool shouldInvalidate = false;
+
             bool mouseDown = MouseHelper.IsLeftMouseButtonDown();
-            if (Camera.IsMouseDown && mouseDown)
+            if (Camera.IsMouseDown)
             {
                 var mouseDelta = Camera.GetMouseDelta();
                 if (mouseDelta != Vector2.Zero)
@@ -261,21 +283,45 @@ namespace CSharp3D.Forms.Controls
                     CameraMove?.Invoke(this, new EventArgs());
                 }
 
-                if (AutoInvalidate)
-                    glControl.Invalidate();
-            }
-            else if (Camera.IsMouseDown && !mouseDown)
-            {
-                var mouseDelta = Camera.GetMouseDelta();
-                if (mouseDelta != Vector2.Zero)
+                if (mouseDown)
                 {
-                    CameraMove?.Invoke(this, new EventArgs());
+                    if (AutoInvalidate)
+                    {
+                        shouldInvalidate = true;
+                    }
                 }
-                Camera.MouseUp(glControl.Width, glControl.Height);
+                else
+                {
+                    Camera.MouseUp(this);
+                }
+            }
+
+            // Check which keys are pressed
+            bool wDown = keysDown.TryGetValue(Keys.W, out bool isW) && isW;
+            bool aDown = keysDown.TryGetValue(Keys.A, out bool isA) && isA;
+            bool sDown = keysDown.TryGetValue(Keys.S, out bool isS) && isS;
+            bool dDown = keysDown.TryGetValue(Keys.D, out bool isD) && isD;
+            bool spaceDown = keysDown.TryGetValue(Keys.Space, out bool isSpc) && isSpc;
+            bool shiftDown = keysDown.TryGetValue(Keys.ShiftKey, out bool isShift) && isShift;
+
+            // If your camera is FreeLookCamera, apply movement
+            if (Camera is FreeLookCamera freeCam)
+            {
+                freeCam.Move(this, deltaTime, wDown, aDown, sDown, dDown, spaceDown, shiftDown);
+
+                if (wDown || aDown || sDown || dDown)
+                {
+                    shouldInvalidate = true;
+                }
             }
 
             GL.BindVertexArray(0);
             glControl.Context.SwapBuffers();
+
+            if (shouldInvalidate)
+            {
+                glControl.Invalidate();
+            }
         }
 
         /// <summary>
@@ -290,13 +336,24 @@ namespace CSharp3D.Forms.Controls
         }
 
         /// <summary>
+        /// Get the location of the center of the control in the user's screen
+        /// </summary>
+        /// <returns></returns>
+        internal Point GetCenterPointInScreen()
+        {
+            var center = glControl.PointToScreen(Location);
+            center = new Point(center.X + Width / 2, center.Y + Height / 2);
+            return center;
+        }
+
+        /// <summary>
         /// Mouse down event for the GLControl.
         /// </summary>
         /// <param name="sender"> The sender. </param>
         /// <param name="e"> The event arguments. </param>
         private void GLControl_MouseDown(object sender, MouseEventArgs e)
         {
-            Camera.MouseDown(e);
+            Camera.MouseDown(this);
 
             Scene.PickMesh(this, Camera, e);
 
@@ -312,6 +369,26 @@ namespace CSharp3D.Forms.Controls
         private void GLControl_MouseWheel(object sender, MouseEventArgs e)
         {
             Camera.MouseWheel(e);
+
+            if (AutoInvalidate)
+                glControl.Invalidate();
+        }
+
+        private Dictionary<Keys, bool> keysDown = new Dictionary<Keys, bool>();
+
+        private void GlControl_KeyDown(object sender, KeyEventArgs e)
+        {
+            // Mark this key as pressed
+            keysDown[e.KeyCode] = true;
+
+            if (AutoInvalidate)
+                glControl.Invalidate();
+        }
+
+        private void GlControl_KeyUp(object sender, KeyEventArgs e)
+        {
+            // Mark this key as released
+            keysDown[e.KeyCode] = false;
 
             if (AutoInvalidate)
                 glControl.Invalidate();

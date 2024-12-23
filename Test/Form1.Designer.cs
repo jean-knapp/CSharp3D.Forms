@@ -34,6 +34,7 @@ namespace Test
             this.rendererControl1 = new CSharp3D.Forms.Controls.RendererControl();
             this.orbitalCamera = new CSharp3D.Forms.Cameras.OrbitalCamera();
             this.scene = new CSharp3D.Forms.Engine.Scene();
+            this.freeLookCamera1 = new CSharp3D.Forms.Cameras.FreeLookCamera();
             this.cuboidMesh1 = new CSharp3D.Forms.Meshes.CuboidMesh();
             this.material1 = new CSharp3D.Forms.Engine.Material();
             this.gridMesh1 = new CSharp3D.Forms.Meshes.GridMesh();
@@ -50,7 +51,7 @@ namespace Test
             this.rendererControl1.Location = new System.Drawing.Point(0, 0);
             this.rendererControl1.Name = "rendererControl1";
             this.rendererControl1.Scene = this.scene;
-            this.rendererControl1.Size = new System.Drawing.Size(800, 450);
+            this.rendererControl1.Size = new System.Drawing.Size(810, 460);
             this.rendererControl1.TabIndex = 0;
             // 
             // orbitalCamera
@@ -69,11 +70,22 @@ namespace Test
             this.scene.AmbientIntensity = 0.2F;
             this.scene.ShaderDirectory = "Shaders/";
             // 
+            // freeLookCamera1
+            // 
+            this.freeLookCamera1.ClampVertically = false;
+            this.freeLookCamera1.FarPlane = 1000F;
+            this.freeLookCamera1.FOV = 90F;
+            this.freeLookCamera1.Location = ((OpenTK.Vector3)(resources.GetObject("freeLookCamera1.Location")));
+            this.freeLookCamera1.MoveSpeed = 5;
+            this.freeLookCamera1.NearPlane = 0.1F;
+            this.freeLookCamera1.Projection = CSharp3D.Forms.Cameras.Camera.Projections.Perspective;
+            this.freeLookCamera1.Rotation = ((OpenTK.Vector3)(resources.GetObject("freeLookCamera1.Rotation")));
+            // 
             // cuboidMesh1
             // 
+            this.cuboidMesh1.Clickable = true;
             this.cuboidMesh1.Location = ((OpenTK.Vector3)(resources.GetObject("cuboidMesh1.Location")));
             this.cuboidMesh1.Material = this.material1;
-            this.cuboidMesh1.Clickable = true;
             this.cuboidMesh1.Rotation = ((OpenTK.Vector3)(resources.GetObject("cuboidMesh1.Rotation")));
             this.cuboidMesh1.ScaleX = 4F;
             this.cuboidMesh1.ScaleY = 1F;
@@ -98,9 +110,9 @@ namespace Test
             // 
             // gridMesh1
             // 
+            this.gridMesh1.Clickable = true;
             this.gridMesh1.LineInterval = 1F;
             this.gridMesh1.Location = ((OpenTK.Vector3)(resources.GetObject("gridMesh1.Location")));
-            this.gridMesh1.Clickable = true;
             this.gridMesh1.Rotation = ((OpenTK.Vector3)(resources.GetObject("gridMesh1.Rotation")));
             this.gridMesh1.Scene = this.scene;
             this.gridMesh1.Size = 4F;
@@ -110,7 +122,7 @@ namespace Test
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(800, 450);
+            this.ClientSize = new System.Drawing.Size(810, 460);
             this.Controls.Add(this.rendererControl1);
             this.Name = "Form1";
             this.Text = "Form1";
@@ -128,6 +140,7 @@ namespace Test
         private CSharp3D.Forms.Meshes.CuboidMesh cuboidMesh1;
         private Material material1;
         private CSharp3D.Forms.Meshes.GridMesh gridMesh1;
+        private CSharp3D.Forms.Cameras.FreeLookCamera freeLookCamera1;
     }
 }
 

@@ -58,6 +58,9 @@
     <Compile Include="Cameras\Camera.cs">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="Cameras\FreeLookCamera.cs">
+      <SubType>Component</SubType>
+    </Compile>
     <Compile Include="Cameras\OrbitalCamera.cs">
       <SubType>Component</SubType>
     </Compile>
