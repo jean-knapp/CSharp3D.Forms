@@ -19,9 +19,7 @@ namespace CSharp3D.Forms.Cameras
         /// <summary>
         /// The projection type of the camera.
         /// </summary>
-        [Category("Appearance")]
-        [Description("The projection type of the camera.")]
-        public Projections Projection { get; set; } = Projections.Perspective;
+        internal Projections Projection { get; set; } = Projections.Perspective;
 
         /// <summary>
         /// The closest distance to the camera that can be rendered, in GL units.
@@ -48,7 +46,12 @@ namespace CSharp3D.Forms.Cameras
 
         internal bool IsKeyDown { get; set; } = false;
 
-        protected Vector2 mouseStartLocation = Vector2.Zero;
+        protected Vector2 MouseInitialLocationReference = Vector2.Zero;
+
+        internal bool IsLeftMouseButtonDown { get; set; } = false;
+
+        internal bool IsMiddleMouseButtonDown { get; set; } = false;
+        internal bool IsRightMouseButtonDown { get; set; } = false;
 
         public Camera()
         {
@@ -60,56 +63,70 @@ namespace CSharp3D.Forms.Cameras
             return Matrix4.Identity;
         }
 
-        public Matrix4 GetProjectionMatrix(int controlWidth, int controlHeight)
+        public virtual Matrix4 GetProjectionMatrix(int controlWidth, int controlHeight)
         {
-            Matrix4 projection;
-
-            switch (Projection)
-            {
-                case Projections.Ortographic:
-                    float scale = 5;
-                    projection = Matrix4.CreateOrthographic(scale * (float)controlWidth / controlHeight, scale, NearPlane, FarPlane);
-                    break;
-                case Projections.Perspective:
-                default:
-                    projection = Matrix4.CreatePerspectiveFieldOfView(FOV * MathHelper.Pi / 180f, (float)controlWidth / controlHeight, NearPlane, FarPlane);
-                    break;
-            }
-
+            Matrix4 projection = Matrix4.CreatePerspectiveFieldOfView(FOV * MathHelper.Pi / 180f, (float)controlWidth / controlHeight, NearPlane, FarPlane);
             return projection;
         }
 
-        public void MouseDown(RendererControl rendererControl)
+        public virtual void MouseDown(RendererControl rendererControl, MouseButtons button)
         {
-            // Get the absolute position of the center of glControl
-            Cursor.Position = rendererControl.GetCenterPointInScreen();
-            Cursor.Hide();
-
-            mouseStartLocation = new Vector2(Cursor.Position.X, Cursor.Position.Y);
+            MouseInitialLocationReference = new Vector2(Cursor.Position.X, Cursor.Position.Y);
 
             IsMouseDown = true;
+
+            if (button == MouseButtons.Left)
+            {
+                IsLeftMouseButtonDown = true;
+            }
+            else if(button == MouseButtons.Middle)
+            {
+                IsMiddleMouseButtonDown = true;
+            }
+            else if (button == MouseButtons.Right)
+            {
+                IsRightMouseButtonDown = true;
+            }
         }
 
-        public virtual void MouseUp(RendererControl rendererControl)
+        public virtual void MouseUp(RendererControl rendererControl, MouseButtons button)
         {
-            Cursor.Show();
+            if (button == MouseButtons.Left)
+            {
+                IsLeftMouseButtonDown = false;
+            }
+            else if (button == MouseButtons.Middle)
+            {
+                IsMiddleMouseButtonDown = false;
+            }
+            else if (button == MouseButtons.Right)
+            {
+                IsRightMouseButtonDown = false;
+            }
 
-            IsMouseDown = false;
+            if (!IsLeftMouseButtonDown && !IsMiddleMouseButtonDown && !IsRightMouseButtonDown)
+            {
+                IsMouseDown = false;
+            }
         }
 
+        /// <summary>
+        /// Get the mouse location relative to the initial reference
+        /// </summary>
+        /// <returns></returns>
         public Vector2 GetMouseDelta()
         {
             if (!IsMouseDown)
             {
-                return Vector2.Zero;
+                //return Vector2.Zero;
             }
             Vector2 mouseLocation = new Vector2(Cursor.Position.X, Cursor.Position.Y);
-            Vector2 result = new Vector2(-(mouseLocation.X - mouseStartLocation.X), mouseLocation.Y - mouseStartLocation.Y);
+            Vector2 result = new Vector2(-(mouseLocation.X - MouseInitialLocationReference.X), mouseLocation.Y - MouseInitialLocationReference.Y);
 
             return result;
         }
 
-        public virtual void MouseWheel(MouseEventArgs e)
+        public virtual void MouseWheel(RendererControl rendererControl, MouseEventArgs e)
         {
 
         }
@@ -159,7 +176,7 @@ namespace CSharp3D.Forms.Cameras
         public static Vector3 GetLocation(Matrix4 viewMatrix)
         {
             Vector3 rotation = VectorOrientation.ToGL(GetRotation(viewMatrix)) * MathHelper.Pi / 180f;
-            float distance = GetDistance(viewMatrix);
+            float distance = GetDistanceFromOrigin(viewMatrix);
 
             Matrix4 yawMatrix = Matrix4.CreateRotationZ(rotation.Z);
             Matrix4 pitchMatrix = Matrix4.CreateRotationX(rotation.X);
@@ -174,21 +191,6 @@ namespace CSharp3D.Forms.Cameras
         }
 
         /// <summary>
-        /// Gets the distance from the camera to the origin, in World units.
-        /// </summary>
-        /// <param name="viewMatrix"> The view matrix of the camera. </param>
-        /// <returns> The distance from the camera to the origin, in World units. </returns>
-        public static float GetDistance(Matrix4 viewMatrix)
-        {
-            return -viewMatrix.M43;
-        }
-
-        private static float CopySign(float size, float sign)
-        {
-            return Math.Sign(sign) == -1 ? -Math.Abs(size) : Math.Abs(size);
-        }
-
-        /// <summary>
         /// Gets the position of the camera, in World units (X, Y, Z).
         /// </summary>
         /// <param name="controlWidth"> The width of the control. </param>
@@ -197,6 +199,21 @@ namespace CSharp3D.Forms.Cameras
         public virtual Vector3 GetLocation(RendererControl rendererControl)
         {
             return Vector3.Zero;
+        }
+
+        /// <summary>
+        /// Gets the distance from the camera to the origin, in World units.
+        /// </summary>
+        /// <param name="viewMatrix"> The view matrix of the camera. </param>
+        /// <returns> The distance from the camera to the origin, in World units. </returns>
+        public static float GetDistanceFromOrigin(Matrix4 viewMatrix)
+        {
+            return -viewMatrix.M43;
+        }
+
+        private static float CopySign(float size, float sign)
+        {
+            return Math.Sign(sign) == -1 ? -Math.Abs(size) : Math.Abs(size);
         }
 
         public Ray GetPickingRay(RendererControl rendererControl, MouseEventArgs mouseEventArgs)
@@ -248,6 +265,21 @@ namespace CSharp3D.Forms.Cameras
             Ray pickingRay = new Ray(cameraPosition, rayDirection);
 
             return pickingRay;
+        }
+
+        protected void RecenterMouse(RendererControl rendererControl)
+        {
+            // Recenter mouse
+            var center = rendererControl.GetCenterPointInScreen();
+            var diffX = Cursor.Position.X - center.X;
+            var diffY = Cursor.Position.Y - center.Y;
+            MouseInitialLocationReference = new Vector2(MouseInitialLocationReference.X - diffX, MouseInitialLocationReference.Y - diffY);
+            Cursor.Position = center;
+        }
+
+        public virtual void KeyDown(RendererControl rendererControl, Keys keyCode)
+        {
+
         }
     }
 }

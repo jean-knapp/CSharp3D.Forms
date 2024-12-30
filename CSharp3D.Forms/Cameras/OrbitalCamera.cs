@@ -4,6 +4,7 @@ using CSharp3D.Forms.Utils;
 using OpenTK;
 using System;
 using System.ComponentModel;
+using System.IO;
 using System.Windows.Forms;
 
 namespace CSharp3D.Forms.Cameras
@@ -69,23 +70,22 @@ namespace CSharp3D.Forms.Cameras
         {
             var mouseDelta = GetMouseDelta();
             Vector3 rotation = Rotation;
-            rotation = rotation + new Vector3(0, 2 * mouseDelta.Y * FOV / rendererControl.Height, 2 * mouseDelta.X * FOV / rendererControl.Width);
 
-            if (!ClampVertically)
+            if (IsMouseDown)
             {
-                rotation.Y = MathHelper.Clamp(rotation.Y, -90, 90);
+                rotation = rotation + new Vector3(0, 2 * mouseDelta.Y * FOV / rendererControl.Height, 2 * mouseDelta.X * FOV / rendererControl.Width);
+
+                if (!ClampVertically)
+                {
+                    rotation.Y = MathHelper.Clamp(rotation.Y, -90, 90);
+                }
+
+                rotation.X = (rotation.X + 180) % 360 - 180;
+                rotation.Y = (rotation.Y + 180) % 360 - 180;
+                rotation.Z = (rotation.Z + 180) % 360 - 180;
+
+                RecenterMouse(rendererControl);
             }
-
-            rotation.X = (rotation.X + 180) % 360 - 180;
-            rotation.Y = (rotation.Y + 180) % 360 - 180;
-            rotation.Z = (rotation.Z + 180) % 360 - 180;
-
-            // Recenter mouse
-            var center = rendererControl.GetCenterPointInScreen();
-            var diffX = Cursor.Position.X - center.X;
-            var diffY = Cursor.Position.Y - center.Y;
-            mouseStartLocation = new Vector2(mouseStartLocation.X - diffX, mouseStartLocation.Y - diffY);
-            Cursor.Position = center;
 
             return rotation;
         }
@@ -108,16 +108,26 @@ namespace CSharp3D.Forms.Cameras
             return new Vector3(x, y, z);
         }
 
-        public override void MouseUp(RendererControl rendererControl)
+        public override void MouseDown(RendererControl rendererControl, MouseButtons button)
         {
-            Rotation = GetRotation(rendererControl);
+            // Get the absolute position of the center of glControl
+            Cursor.Position = rendererControl.GetCenterPointInScreen();
+            Cursor.Current = MouseHelper.Cursors.None;
 
-            base.MouseUp(rendererControl);
+            base.MouseDown(rendererControl, button);
         }
 
-        public override void MouseWheel(MouseEventArgs e)
+        public override void MouseUp(RendererControl rendererControl, MouseButtons button)
         {
-            base.MouseWheel(e);
+            Cursor.Current = Cursors.Default;
+            Rotation = GetRotation(rendererControl);
+
+            base.MouseUp(rendererControl, button);
+        }
+
+        public override void MouseWheel(RendererControl rendererControl, MouseEventArgs e)
+        {
+            base.MouseWheel(rendererControl, e);
 
             Distance = (float)(Distance * Math.Pow(2, -e.Delta / 256f));
         }

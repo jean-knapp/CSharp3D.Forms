@@ -64,6 +64,9 @@
     <Compile Include="Cameras\OrbitalCamera.cs">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="Cameras\OrtographicCamera.cs">
+      <SubType>Component</SubType>
+    </Compile>
     <Compile Include="Controls\MeshEventArgs.cs" />
     <Compile Include="Controls\RendererControl.cs">
       <SubType>UserControl</SubType>
@@ -129,6 +132,7 @@
     <Compile Include="Properties\Resources.Designer.cs">
       <AutoGen>True</AutoGen>
       <DependentUpon>Resources.resx</DependentUpon>
+      <DesignTime>True</DesignTime>
     </Compile>
     <None Include="OpenTK.dll.config" />
     <None Include="packages.config" />
@@ -165,6 +169,10 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Resources\cross.cur" />
+    <None Include="Resources\none.cur" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

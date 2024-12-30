@@ -32,8 +32,9 @@ namespace Test
         {
             System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(Form1));
             this.rendererControl1 = new CSharp3D.Forms.Controls.RendererControl();
-            this.orbitalCamera = new CSharp3D.Forms.Cameras.OrbitalCamera();
+            this.ortographicCamera1 = new CSharp3D.Forms.Cameras.OrtographicCamera();
             this.scene = new CSharp3D.Forms.Engine.Scene();
+            this.orbitalCamera = new CSharp3D.Forms.Cameras.OrbitalCamera();
             this.freeLookCamera1 = new CSharp3D.Forms.Cameras.FreeLookCamera();
             this.cuboidMesh1 = new CSharp3D.Forms.Meshes.CuboidMesh();
             this.material1 = new CSharp3D.Forms.Engine.Material();
@@ -46,13 +47,29 @@ namespace Test
             // 
             this.rendererControl1.AutoInvalidate = true;
             this.rendererControl1.BackColor = System.Drawing.Color.Gray;
-            this.rendererControl1.Camera = this.orbitalCamera;
+            this.rendererControl1.Camera = this.freeLookCamera1;
             this.rendererControl1.Dock = System.Windows.Forms.DockStyle.Fill;
             this.rendererControl1.Location = new System.Drawing.Point(0, 0);
             this.rendererControl1.Name = "rendererControl1";
             this.rendererControl1.Scene = this.scene;
             this.rendererControl1.Size = new System.Drawing.Size(810, 460);
             this.rendererControl1.TabIndex = 0;
+            // 
+            // ortographicCamera1
+            // 
+            this.ortographicCamera1.ClampVertically = false;
+            this.ortographicCamera1.FarPlane = 1000F;
+            this.ortographicCamera1.FOV = 90F;
+            this.ortographicCamera1.Location = ((OpenTK.Vector3)(resources.GetObject("ortographicCamera1.Location")));
+            this.ortographicCamera1.MoveSpeed = 5;
+            this.ortographicCamera1.NearPlane = 0.1F;
+            this.ortographicCamera1.Rotation = ((OpenTK.Vector3)(resources.GetObject("ortographicCamera1.Rotation")));
+            // 
+            // scene
+            // 
+            this.scene.AmbientColor = System.Drawing.Color.White;
+            this.scene.AmbientIntensity = 0.2F;
+            this.scene.ShaderDirectory = "Shaders/";
             // 
             // orbitalCamera
             // 
@@ -61,14 +78,7 @@ namespace Test
             this.orbitalCamera.FarPlane = 10000F;
             this.orbitalCamera.FOV = 90F;
             this.orbitalCamera.NearPlane = 0.1F;
-            this.orbitalCamera.Projection = CSharp3D.Forms.Cameras.Camera.Projections.Perspective;
             this.orbitalCamera.Rotation = ((OpenTK.Vector3)(resources.GetObject("orbitalCamera.Rotation")));
-            // 
-            // scene
-            // 
-            this.scene.AmbientColor = System.Drawing.Color.White;
-            this.scene.AmbientIntensity = 0.2F;
-            this.scene.ShaderDirectory = "Shaders/";
             // 
             // freeLookCamera1
             // 
@@ -78,7 +88,6 @@ namespace Test
             this.freeLookCamera1.Location = ((OpenTK.Vector3)(resources.GetObject("freeLookCamera1.Location")));
             this.freeLookCamera1.MoveSpeed = 5;
             this.freeLookCamera1.NearPlane = 0.1F;
-            this.freeLookCamera1.Projection = CSharp3D.Forms.Cameras.Camera.Projections.Perspective;
             this.freeLookCamera1.Rotation = ((OpenTK.Vector3)(resources.GetObject("freeLookCamera1.Rotation")));
             // 
             // cuboidMesh1
@@ -141,6 +150,7 @@ namespace Test
         private Material material1;
         private CSharp3D.Forms.Meshes.GridMesh gridMesh1;
         private CSharp3D.Forms.Cameras.FreeLookCamera freeLookCamera1;
+        private CSharp3D.Forms.Cameras.OrtographicCamera ortographicCamera1;
     }
 }
 

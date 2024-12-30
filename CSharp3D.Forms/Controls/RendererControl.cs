@@ -1,6 +1,5 @@
 ﻿using CSharp3D.Forms.Cameras;
 using CSharp3D.Forms.Engine;
-using CSharp3D.Forms.Engine.Helpers;
 using CSharp3D.Forms.Exceptions;
 using CSharp3D.Forms.Meshes;
 using CSharp3D.Forms.Utils;
@@ -98,6 +97,10 @@ namespace CSharp3D.Forms.Controls
                 return glControl.Context;
             }
         }
+
+        private double lastFrameTime = 0;
+
+        private Dictionary<Keys, bool> keysDown = new Dictionary<Keys, bool>();
 
         public RendererControl()
         {
@@ -197,15 +200,11 @@ namespace CSharp3D.Forms.Controls
                 glControl.Invalidate();
         }
 
-        private double lastFrameTime = 0;
-
         /// <summary>
-        /// Paint the GLControl.
+        /// Calculates the elapsed time since the last time the GlControl was painted.
         /// </summary>
-        /// <param name="sender"> The sender. </param>
-        /// <param name="e"> The event arguments. </param>
-        /// <exception cref="CameraNotSetException"> Exception thrown when the camera is not set in a RendererControl </exception>
-        private void GLControl_Paint(object sender, PaintEventArgs e)
+        /// <returns> The delta time, in seconds.
+        private double GetDeltaTime()
         {
             double currentTime = (double)Environment.TickCount / 1000.0;
             double deltaTime = currentTime - lastFrameTime;
@@ -216,6 +215,19 @@ namespace CSharp3D.Forms.Controls
             {
                 deltaTime = 0;
             }
+
+            return deltaTime;
+        }
+
+        /// <summary>
+        /// Paint the GLControl.
+        /// </summary>
+        /// <param name="sender"> The sender. </param>
+        /// <param name="e"> The event arguments. </param>
+        /// <exception cref="CameraNotSetException"> Exception thrown when the camera is not set in a RendererControl </exception>
+        private void GLControl_Paint(object sender, PaintEventArgs e)
+        {
+            double deltaTime = GetDeltaTime();
 
             if (this.DesignMode)
             {
@@ -274,7 +286,20 @@ namespace CSharp3D.Forms.Controls
 
             bool shouldInvalidate = false;
 
-            bool mouseDown = MouseHelper.IsLeftMouseButtonDown();
+            if (Camera.IsLeftMouseButtonDown && !MouseHelper.IsLeftMouseButtonDown())
+            {
+                Camera.MouseUp(this, MouseButtons.Left);
+            }
+            if (Camera.IsMiddleMouseButtonDown && !MouseHelper.IsMiddleMouseButtonDown())
+            {
+                Camera.MouseUp(this, MouseButtons.Middle);
+            }
+            if (Camera.IsRightMouseButtonDown && !MouseHelper.IsRightMouseButtonDown())
+            {
+                Camera.MouseUp(this, MouseButtons.Right);
+            }
+
+            bool mouseDown = MouseHelper.IsLeftMouseButtonDown() || MouseHelper.IsMiddleMouseButtonDown() || MouseHelper.IsRightMouseButtonDown();
             if (Camera.IsMouseDown)
             {
                 var mouseDelta = Camera.GetMouseDelta();
@@ -289,10 +314,6 @@ namespace CSharp3D.Forms.Controls
                     {
                         shouldInvalidate = true;
                     }
-                }
-                else
-                {
-                    Camera.MouseUp(this);
                 }
             }
 
@@ -310,6 +331,11 @@ namespace CSharp3D.Forms.Controls
                 freeCam.Move(this, deltaTime, wDown, aDown, sDown, dDown, spaceDown, shiftDown);
 
                 if (wDown || aDown || sDown || dDown)
+                {
+                    shouldInvalidate = true;
+                }
+
+                if (freeCam.MouseLook)
                 {
                     shouldInvalidate = true;
                 }
@@ -353,7 +379,7 @@ namespace CSharp3D.Forms.Controls
         /// <param name="e"> The event arguments. </param>
         private void GLControl_MouseDown(object sender, MouseEventArgs e)
         {
-            Camera.MouseDown(this);
+            Camera.MouseDown(this, e.Button);
 
             Scene.PickMesh(this, Camera, e);
 
@@ -368,18 +394,18 @@ namespace CSharp3D.Forms.Controls
         /// <param name="e"> The event arguments. </param>
         private void GLControl_MouseWheel(object sender, MouseEventArgs e)
         {
-            Camera.MouseWheel(e);
+            Camera.MouseWheel(this, e);
 
             if (AutoInvalidate)
                 glControl.Invalidate();
         }
 
-        private Dictionary<Keys, bool> keysDown = new Dictionary<Keys, bool>();
-
         private void GlControl_KeyDown(object sender, KeyEventArgs e)
         {
             // Mark this key as pressed
             keysDown[e.KeyCode] = true;
+
+            Camera.KeyDown(this, e.KeyCode);
 
             if (AutoInvalidate)
                 glControl.Invalidate();
