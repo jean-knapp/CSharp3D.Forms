@@ -59,15 +59,23 @@ namespace CSharp3D.Forms.Engine
         }
 
         /// <summary>
-        /// Unloads the texture data from the context of a RendererControl.
+        /// Disposes the texture data.
         /// </summary>
-        /// <param name="context"></param>
-        public void UnloadTexture(object context)
+        /// <param name="context"> The context of the RendererControl. </param>
+        public void Dispose(object context)
         {
-            if (textureId.ContainsKey(context))
+            try
             {
-                GL.DeleteTexture(textureId[context]);
-                textureId.Remove(context);
+                if (textureId.ContainsKey(context))
+                {
+                    GL.DeleteTexture(textureId[context]);
+                    textureId.Remove(context);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Handle exceptions, such as logging
+                Console.WriteLine($"Failed to delete textures: {ex.Message}");
             }
         }
 
@@ -117,16 +125,6 @@ namespace CSharp3D.Forms.Engine
             GL.GenerateMipmap(GenerateMipmapTarget.Texture2D);
 
             GL.BindTexture(TextureTarget.Texture2D, 0);
-        }
-
-        /// <summary>
-        /// Disposes the texture data.
-        /// </summary>
-        /// <param name="context"> The context of the RendererControl. </param>
-        public void Dispose(object context)
-        {
-            if (textureId.ContainsKey(context))
-                GL.DeleteTexture(textureId[context]);
         }
     }
 }

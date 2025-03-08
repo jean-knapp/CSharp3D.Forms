@@ -13,7 +13,7 @@ namespace Test
         {
             InitializeComponent();
 
-            CuboidMesh lightBulb = new CuboidMesh(new Vector3(0, 0, 4), new Vector3(0, 0, 0));
+            CuboidMesh lightBulb = new CuboidMesh(new Vector3(0, 0, 3), new Vector3(0, 0, 0));
             lightBulb.Material = new Material();
             lightBulb.Material.ShaderName = "Generic";
             lightBulb.Material.Unlit = true;

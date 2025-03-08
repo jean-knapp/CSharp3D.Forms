@@ -1,4 +1,5 @@
 ﻿using CSharp3D.Forms.Controls;
+using CSharp3D.Forms.Engine;
 using CSharp3D.Forms.Engine.Helpers;
 using CSharp3D.Forms.Utils;
 using OpenTK;
@@ -165,7 +166,7 @@ namespace CSharp3D.Forms.Cameras
                 new Vector3(-1, 0, 0)
             ) * -1 * 180 / MathHelper.Pi;
 
-            return rotation;
+            return new Vector3(rotation.X, rotation.Y, rotation.Z);
         }
 
         /// <summary>

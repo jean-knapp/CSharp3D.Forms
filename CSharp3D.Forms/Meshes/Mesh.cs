@@ -6,6 +6,7 @@ using CSharp3D.Forms.Lights;
 using CSharp3D.Forms.Utils;
 using OpenTK;
 using OpenTK.Graphics.OpenGL;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
@@ -86,9 +87,9 @@ namespace CSharp3D.Forms.Meshes
             Rotation = new Vector3(0, 0, 0);
         }
 
-        public Mesh(Vector3 position, Vector3 rotation)
+        public Mesh(Vector3 location, Vector3 rotation)
         {
-            Location = position;
+            Location = location;
             Rotation = rotation;
         }
 
@@ -108,16 +109,37 @@ namespace CSharp3D.Forms.Meshes
             _scene.Meshes.Add(this);
         }
 
+        /// <summary>
+        /// Deletes the mesh's OpenGL resources.
+        /// </summary>
+        /// <param name="context"> The context to delete the resources in. </param>
         public void Dispose(object context)
         {
-            if (vbo.ContainsKey(context))
-                GL.DeleteBuffer(vbo[context]);
+            try
+            {
+                if (vao.ContainsKey(context) && vao[context] != 0)
+                {
+                    GL.DeleteVertexArray(vao[context]);
+                    vao.Remove(context);
+                }
 
-            if (vao.ContainsKey(context))
-                GL.DeleteVertexArray(vao[context]);
+                if (vbo.ContainsKey(context) && vbo[context] != 0)
+                {
+                    GL.DeleteBuffer(vbo[context]);
+                    vbo.Remove(context);
+                }
 
-            if (ebo.ContainsKey(context))
-                GL.DeleteBuffer(ebo[context]);
+                if (ebo.ContainsKey(context) && ebo[context] != 0)
+                {
+                    GL.DeleteBuffer(ebo[context]);
+                    ebo.Remove(context);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Handle exceptions if needed, such as logging
+                Console.WriteLine($"Failed to delete mesh resources: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -272,75 +294,81 @@ namespace CSharp3D.Forms.Meshes
         /// <param name="view"> The view matrix. </param>
         public void DrawMesh(object context, Scene scene, Matrix4 projection, Matrix4 view)
         {
-            if (!IsVertexDataLoaded(context))
+            try
             {
-                SetupMesh(context);
-            }
+                if (!IsVertexDataLoaded(context))
+                {
+                    SetupMesh(context);
+                }
 
-            Material.Use(context, scene);
+                Material.Use(context, scene);
 
-            int shaderProgram = Material.Shader.GetShaderId(context, scene);
+                int shaderProgram = Material.Shader.GetShaderId(context, scene);
 
-            int useDiffuseTextureLocation = GL.GetUniformLocation(shaderProgram, "uUseDiffuseTexture");
-            GL.Uniform1(useDiffuseTextureLocation, Material.Albedo != null && Material.Albedo.Bitmap != null ? 1 : 0);
+                int useDiffuseTextureLocation = GL.GetUniformLocation(shaderProgram, "uUseDiffuseTexture");
+                GL.Uniform1(useDiffuseTextureLocation, Material.Albedo != null && Material.Albedo.Bitmap != null ? 1 : 0);
 
-            int useNormalTextureLocation = GL.GetUniformLocation(shaderProgram, "uUseNormalTexture");
-            GL.Uniform1(useNormalTextureLocation, Material.Normal != null && Material.Normal.Bitmap != null ? 1 : 0);
+                int useNormalTextureLocation = GL.GetUniformLocation(shaderProgram, "uUseNormalTexture");
+                GL.Uniform1(useNormalTextureLocation, Material.Normal != null && Material.Normal.Bitmap != null ? 1 : 0);
 
-            int useSpecularTextureLocation = GL.GetUniformLocation(shaderProgram, "uUseSpecularTexture");
-            GL.Uniform1(useSpecularTextureLocation, Material.Specular != null && Material.Specular.Bitmap != null ? 1 : 0);
+                int useSpecularTextureLocation = GL.GetUniformLocation(shaderProgram, "uUseSpecularTexture");
+                GL.Uniform1(useSpecularTextureLocation, Material.Specular != null && Material.Specular.Bitmap != null ? 1 : 0);
 
-            int specularStrengthLocation = GL.GetUniformLocation(shaderProgram, "uSpecularStrength");
-            GL.Uniform1(specularStrengthLocation, Material.SpecularStrength);
+                int specularStrengthLocation = GL.GetUniformLocation(shaderProgram, "uSpecularStrength");
+                GL.Uniform1(specularStrengthLocation, Material.SpecularStrength);
 
-            int addSelfLocation = GL.GetUniformLocation(shaderProgram, "uAddSelf");
-            GL.Uniform1(addSelfLocation, Material.AddSelf);
+                int addSelfLocation = GL.GetUniformLocation(shaderProgram, "uAddSelf");
+                GL.Uniform1(addSelfLocation, Material.AddSelf);
 
-            int overbrightFactorLocation = GL.GetUniformLocation(shaderProgram, "uOverbrightFactor");
-            GL.Uniform1(overbrightFactorLocation, Material.OverbrightFactor);
+                int overbrightFactorLocation = GL.GetUniformLocation(shaderProgram, "uOverbrightFactor");
+                GL.Uniform1(overbrightFactorLocation, Material.OverbrightFactor);
 
-            int colorLocation = GL.GetUniformLocation(shaderProgram, "uBaseColor");
-            GL.Uniform4(colorLocation, new Vector4(Material.Color.R / 255f, Material.Color.G / 255f, Material.Color.B / 255f, Material.Alpha));
+                int colorLocation = GL.GetUniformLocation(shaderProgram, "uBaseColor");
+                GL.Uniform4(colorLocation, new Vector4(Material.Color.R / 255f, Material.Color.G / 255f, Material.Color.B / 255f, Material.Alpha));
 
-            int lightPositionLocation = GL.GetUniformLocation(shaderProgram, "uLightPosition");
-            int lightColorLocation = GL.GetUniformLocation(shaderProgram, "uLightColor");
-            int ambientColorLocation = GL.GetUniformLocation(shaderProgram, "uAmbientColor");
-            int lightAttenuationLocation = GL.GetUniformLocation(shaderProgram, "uLightAttenuation");
-            if (scene.Lights.Count > 0)
+                int lightPositionLocation = GL.GetUniformLocation(shaderProgram, "uLightPosition");
+                int lightColorLocation = GL.GetUniformLocation(shaderProgram, "uLightColor");
+                int ambientColorLocation = GL.GetUniformLocation(shaderProgram, "uAmbientColor");
+                int lightAttenuationLocation = GL.GetUniformLocation(shaderProgram, "uLightAttenuation");
+                if (scene.Lights.Count > 0)
+                {
+                    PointLight pointLight = scene.Lights[0];
+                    GL.Uniform3(lightPositionLocation, VectorOrientation.ToGL(pointLight.Location));
+                    GL.Uniform4(lightColorLocation, Material.Unlit ? new Vector4(1, 1, 1, 0) : new Vector4(pointLight.Color.R / 255f, pointLight.Color.G / 255f, pointLight.Color.B / 255f, pointLight.Intensity));
+                    GL.Uniform4(ambientColorLocation, Material.Unlit ? new Vector4(1, 1, 1, 1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity));
+                    GL.Uniform3(lightAttenuationLocation, new Vector3(pointLight.Quadratic, pointLight.Linear, pointLight.Constant));
+                }
+                else
+                {
+                    GL.Uniform3(lightPositionLocation, VectorOrientation.ToGL(new Vector3(0, 0, 0)));
+                    GL.Uniform4(lightColorLocation, new Vector4(1.0f, 1.0f, 1.0f, 0.0f));
+                    GL.Uniform4(ambientColorLocation, Material.Unlit ? new Vector4(1, 1, 1, 1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity));
+                    GL.Uniform3(lightAttenuationLocation, new Vector3(1.0f, 0.0f, 0.0f));
+                }
+
+                int cameraPositionLocation = GL.GetUniformLocation(shaderProgram, "uCameraPosition");
+                var cameraLocation = Camera.GetLocation(view);
+                GL.Uniform3(cameraPositionLocation, VectorOrientation.ToGL(cameraLocation));
+
+                // Set the projection matrix
+                int projLoc = GL.GetUniformLocation(shaderProgram, "uProjection");
+                GL.UniformMatrix4(projLoc, false, ref projection);
+
+                // Set the view matrix
+                int viewLoc = GL.GetUniformLocation(shaderProgram, "uView");
+                GL.UniformMatrix4(viewLoc, false, ref view);
+
+                Matrix4 model = GetModelMatrix(view);
+                int modelLoc = GL.GetUniformLocation(shaderProgram, "uModel");
+                GL.UniformMatrix4(modelLoc, false, ref model);
+
+                GL.BindVertexArray(vao[context]);
+                GL.DrawElements(PrimitiveType, GetIndexArray().Length, DrawElementsType.UnsignedInt, 0);
+                GL.BindVertexArray(0);
+            } catch (AccessViolationException e)
             {
-                PointLight pointLight = scene.Lights[0];
-                GL.Uniform3(lightPositionLocation, VectorOrientation.ToGL(pointLight.Location));
-                GL.Uniform4(lightColorLocation, Material.Unlit ? new Vector4(1,1,1,0) : new Vector4(pointLight.Color.R / 255f, pointLight.Color.G / 255f, pointLight.Color.B / 255f, pointLight.Intensity));
-                GL.Uniform4(ambientColorLocation, Material.Unlit ? new Vector4(1,1,1,1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity));
-                GL.Uniform3(lightAttenuationLocation, new Vector3(pointLight.Quadratic, pointLight.Linear, pointLight.Constant));
+
             }
-            else
-            {
-                GL.Uniform3(lightPositionLocation, VectorOrientation.ToGL(new Vector3(0, 0, 0)));
-                GL.Uniform4(lightColorLocation, new Vector4(1.0f, 1.0f, 1.0f, 0.0f));
-                GL.Uniform4(ambientColorLocation, Material.Unlit ? new Vector4(1,1,1,1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity));
-                GL.Uniform3(lightAttenuationLocation, new Vector3(1.0f, 0.0f, 0.0f));
-            }
-
-            int cameraPositionLocation = GL.GetUniformLocation(shaderProgram, "uCameraPosition");
-            var cameraLocation = Camera.GetLocation(view);
-            GL.Uniform3(cameraPositionLocation, VectorOrientation.ToGL(cameraLocation));
-
-            // Set the projection matrix
-            int projLoc = GL.GetUniformLocation(shaderProgram, "uProjection");
-            GL.UniformMatrix4(projLoc, false, ref projection);
-
-            // Set the view matrix
-            int viewLoc = GL.GetUniformLocation(shaderProgram, "uView");
-            GL.UniformMatrix4(viewLoc, false, ref view);
-
-            Matrix4 model = GetModelMatrix(view);
-            int modelLoc = GL.GetUniformLocation(shaderProgram, "uModel");
-            GL.UniformMatrix4(modelLoc, false, ref model);
-
-            GL.BindVertexArray(vao[context]);
-            GL.DrawElements(PrimitiveType, GetIndexArray().Length, DrawElementsType.UnsignedInt, 0);
-            GL.BindVertexArray(0);
         }
 
         /// <summary>

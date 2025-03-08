@@ -74,10 +74,13 @@
     <Compile Include="Controls\RendererControl.Designer.cs">
       <DependentUpon>RendererControl.cs</DependentUpon>
     </Compile>
+    <Compile Include="Engine\AABB.cs" />
+    <Compile Include="Engine\Location.cs" />
     <Compile Include="Engine\Material.cs">
       <SubType>Component</SubType>
     </Compile>
     <Compile Include="Engine\Shader.cs" />
+    <Compile Include="Engine\Dimensions.cs" />
     <Compile Include="Engine\Texture.cs">
       <SubType>Component</SubType>
     </Compile>
