@@ -1,6 +1,7 @@
 ﻿using CSharp3D.Forms.Engine;
 using CSharp3D.Forms.Engine.Helpers;
 using OpenTK;
+using OpenTK.Graphics.ES20;
 using System.ComponentModel;
 
 namespace CSharp3D.Forms.Meshes
@@ -76,7 +77,7 @@ namespace CSharp3D.Forms.Meshes
 
         }
 
-        public CuboidMesh(Vector3 position, Vector3 rotation) : base(position, rotation)
+        public CuboidMesh(LocationVector position, RotationVector rotation) : base(position, rotation)
         {
 
         }
@@ -93,7 +94,7 @@ namespace CSharp3D.Forms.Meshes
             for (int i = 0; i < vertices.Length; i++)
             {
                 // Position
-                Vector3 location = VectorOrientation.ToGL(new Vector3(vertices[i].X * ScaleX, vertices[i].Y * ScaleY, vertices[i].Z * ScaleZ));
+                Vector3 location = VectorOrientation.ToGL(LocationVector.Multiply(new LocationVector(vertices[i].X, vertices[i].Y, vertices[i].Z), new Vector3(ScaleX, ScaleY, ScaleZ)));
                 vertexArray[i * 8] = location.X;
                 vertexArray[i * 8 + 1] = location.Y;
                 vertexArray[i * 8 + 2] = location.Z;

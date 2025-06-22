@@ -1,4 +1,5 @@
-﻿using OpenTK;
+﻿using CSharp3D.Forms.Engine;
+using OpenTK;
 using OpenTK.Graphics.OpenGL;
 using System.ComponentModel;
 
@@ -14,7 +15,7 @@ namespace CSharp3D.Forms.Meshes
         /// The vertices of the line.
         /// </summary>
         [Browsable(false)]
-        public Vector3[] Vertices { get; set; } = { };
+        public LocationVector[] Vertices { get; set; } = { };
 
         public LineMesh() : base()
         {
@@ -23,7 +24,7 @@ namespace CSharp3D.Forms.Meshes
             PrimitiveType = PrimitiveType.Lines;
         }
 
-        public LineMesh(Vector3 position, Vector3 rotation) : base(position, rotation)
+        public LineMesh(LocationVector position, RotationVector rotation) : base(position, rotation)
         {
             Material = new Engine.Material();
             Material.ShaderName = "Wireframe";

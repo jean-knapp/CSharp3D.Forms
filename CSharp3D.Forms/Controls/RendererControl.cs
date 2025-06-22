@@ -124,7 +124,7 @@ namespace CSharp3D.Forms.Controls
 
                 if (Camera == null)
                 {
-                    Camera = new OrbitalCamera(new Vector3(0, 0, 0), 4);
+                    Camera = new OrbitalCamera(new RotationVector(0, 0, 0), 4);
                 }
             }
 
@@ -270,7 +270,7 @@ namespace CSharp3D.Forms.Controls
 
             if (Camera is OrbitalCamera)
             {
-                Vector3 cameraPosition = (Camera as OrbitalCamera).GetLocation(this); // Correctly calculate camera position
+                LocationVector cameraPosition = (Camera as OrbitalCamera).GetLocation(this); // Correctly calculate camera position
 
                 var sortedTransparentMeshes = transparentMeshes
                     .OrderByDescending(mesh => mesh.GetDistanceFromCamera(cameraPosition))

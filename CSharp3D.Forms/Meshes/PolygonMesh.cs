@@ -21,7 +21,7 @@ namespace CSharp3D.Forms.Meshes
 
         }
 
-        public PolygonMesh(Vector3 position, Vector3 rotation) : base(position, rotation)
+        public PolygonMesh(LocationVector position, RotationVector rotation) : base(position, rotation)
         {
 
         }

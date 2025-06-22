@@ -45,7 +45,7 @@ namespace CSharp3D.Forms.Meshes
 
         }
 
-        public QuakeFaceMesh(Vector3 position, Vector3 rotation) : base(position, rotation)
+        public QuakeFaceMesh(LocationVector position, RotationVector rotation) : base(position, rotation)
         {
 
         }

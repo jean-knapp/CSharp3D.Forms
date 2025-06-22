@@ -47,7 +47,7 @@ namespace CSharp3D.Forms.Meshes
 
         }
 
-        public SpriteMesh(Vector3 position, Vector3 rotation) : base(position, rotation)
+        public SpriteMesh(LocationVector position, RotationVector rotation) : base(position, rotation)
         {
 
         }
@@ -151,7 +151,7 @@ namespace CSharp3D.Forms.Meshes
         {
             var rotation = Camera.GetRotation(viewMatrix);
 
-            Rotation = new Vector3(Rotation.X, (ZAxisRotationOnly ? Rotation.Y : -rotation.Y), rotation.Z + 180);
+            Rotation = new RotationVector(Rotation.Roll, (ZAxisRotationOnly ? Rotation.Pitch : -rotation.Pitch), rotation.Yaw + 180);
 
             return base.GetModelMatrix(viewMatrix);
         }

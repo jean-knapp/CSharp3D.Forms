@@ -1,4 +1,5 @@
 ﻿using CSharp3D.Forms.Controls;
+using CSharp3D.Forms.Engine;
 using CSharp3D.Forms.Engine.Helpers;
 using CSharp3D.Forms.Utils;
 using OpenTK;
@@ -20,17 +21,17 @@ namespace CSharp3D.Forms.Cameras
         /// The rotation of the camera, in degrees (Roll, Pitch, Yaw).
         /// </summary>
         [Category("Position")]
-        [TypeConverter(typeof(Vector3TypeConverter))]
+        [TypeConverter(typeof(RotationVectorTypeConverter))]
         [Description("The rotation of the camera, in degrees (Roll, Pitch, Yaw).")]
-        public Vector3 Rotation { get; set; } = new Vector3(0, 0, 0);
+        public RotationVector Rotation { get; set; } = new RotationVector(0, 0, 0);
 
         /// <summary>
         /// The distance from the camera to the origin, in World units.
         /// </summary>
         [Category("Position")]
-        [TypeConverter(typeof(Vector3TypeConverter))]
+        [TypeConverter(typeof(LocationVectorTypeConverter))]
         [Description("The location of the camera relative to the origin, in World units.")]
-        public Vector3 Location { get; set; } = new Vector3(0,0,0);
+        public LocationVector Location { get; set; } = new LocationVector(0,0,0);
 
         /// <summary>
         /// Whether to clamp the vertical rotation of the camera to 90 degrees.
@@ -49,7 +50,7 @@ namespace CSharp3D.Forms.Cameras
         {
         }
 
-        public FreeLookCamera(Vector3 direction, Vector3 location)
+        public FreeLookCamera(RotationVector direction, LocationVector location)
         {
             Rotation = direction;
             Location = location;
@@ -90,23 +91,23 @@ namespace CSharp3D.Forms.Cameras
         /// <param name="controlWidth"> The width of the control. </param>
         /// <param name="controlHeight"> The height of the control. </param>
         /// <returns> The rotation of the camera, in degrees (Roll, Pitch, Yaw). </returns>
-        public Vector3 GetRotation(RendererControl rendererControl)
+        public RotationVector GetRotation(RendererControl rendererControl)
         {
             var mouseDelta = GetMouseDelta();
-            Vector3 rotation = Rotation;
+            RotationVector rotation = Rotation;
 
             if (IsMiddleMouseButtonDown || MouseLook)
             {
-                rotation = rotation - new Vector3(0, 2 * mouseDelta.Y * FOV / rendererControl.Height, 2 * mouseDelta.X * FOV / rendererControl.Width);
+                rotation = rotation - new RotationVector(0, 2 * mouseDelta.Y * FOV / rendererControl.Height, 2 * mouseDelta.X * FOV / rendererControl.Width);
 
                 if (!ClampVertically)
                 {
-                    rotation.Y = MathHelper.Clamp(rotation.Y, -90, 90);
+                    rotation.Pitch = MathHelper.Clamp(rotation.Pitch, -90, 90);
                 }
 
-                rotation.X = (rotation.X + 180) % 360 - 180;
-                rotation.Y = (rotation.Y + 180) % 360 - 180;
-                rotation.Z = (rotation.Z + 180) % 360 - 180;
+                rotation.Roll = (rotation.Roll + 180) % 360 - 180;
+                rotation.Pitch = (rotation.Pitch + 180) % 360 - 180;
+                rotation.Yaw = (rotation.Yaw + 180) % 360 - 180;
 
                 RecenterMouse(rendererControl);
             }
@@ -120,7 +121,7 @@ namespace CSharp3D.Forms.Cameras
         /// <param name="controlWidth"> The width of the control. </param>
         /// <param name="controlHeight"> The height of the control. </param>
         /// <returns> The position of the camera, in World units (X, Y, Z). </returns>
-        public override Vector3 GetLocation(RendererControl rendererControl)
+        public override LocationVector GetLocation(RendererControl rendererControl)
         {
             return Location;
         }
@@ -181,8 +182,8 @@ namespace CSharp3D.Forms.Cameras
 
             var rotation = GetRotation(control);
 
-            double yaw = -rotation.Z * Math.PI / 180f;
-            double pitch = rotation.Y * Math.PI / 180f;
+            double yaw = -rotation.Yaw * Math.PI / 180f;
+            double pitch = rotation.Pitch * Math.PI / 180f;
 
             if (wDown)
             {
@@ -210,7 +211,7 @@ namespace CSharp3D.Forms.Cameras
                 y -= (float)(distance * Math.Sin(yaw + Math.PI / 2));
             }
 
-            Location = new Vector3(x, y, z);
+            Location = new LocationVector(x, y, z);
         }
     }
 }

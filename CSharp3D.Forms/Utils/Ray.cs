@@ -1,24 +1,25 @@
-﻿using OpenTK;
+﻿using CSharp3D.Forms.Engine;
+using OpenTK;
 using System;
 
 namespace CSharp3D.Forms.Utils
 {
     public class Ray
     {
-        public Vector3 Origin { get; }
-        public Vector3 Direction { get; } // Must be normalized
+        public LocationVector Origin { get; }
+        public RotationVector Direction { get; } // Must be normalized
 
-        public Ray(Vector3 origin, Vector3 direction)
+        public Ray(LocationVector origin, RotationVector direction)
         {
             Origin = origin;
             Direction = direction;
         }
 
         public bool RayIntersectsAABB(
-            Vector3 rayOrigin,
-            Vector3 rayDirection,
-            Vector3 boxMin,
-            Vector3 boxMax,
+            LocationVector rayOrigin,
+            RotationVector rayDirection,
+            LocationVector boxMin,
+            LocationVector boxMax,
             out float tNear)
         {
             // Initialize tNear/tFar for the intersection intervals
@@ -31,7 +32,7 @@ namespace CSharp3D.Forms.Utils
             // If not, there's no intersection.
 
             // X-axis
-            if (Math.Abs(rayDirection.X) < 1e-8)
+            if (Math.Abs(rayDirection.Roll) < 1e-8)
             {
                 // The ray is parallel to X
                 if (rayOrigin.X < boxMin.X || rayOrigin.X > boxMax.X)
@@ -42,7 +43,7 @@ namespace CSharp3D.Forms.Utils
             }
             else
             {
-                float ood = 1.0f / rayDirection.X; // inverse of direction
+                float ood = 1.0f / rayDirection.Roll; // inverse of direction
                 float t1 = (boxMin.X - rayOrigin.X) * ood;
                 float t2 = (boxMax.X - rayOrigin.X) * ood;
                 if (t1 > t2) (t1, t2) = (t2, t1); // swap
@@ -52,7 +53,7 @@ namespace CSharp3D.Forms.Utils
             }
 
             // Y-axis
-            if (Math.Abs(rayDirection.Y) < 1e-8)
+            if (Math.Abs(rayDirection.Pitch) < 1e-8)
             {
                 // The ray is parallel to Y
                 if (rayOrigin.Y < boxMin.Y || rayOrigin.Y > boxMax.Y)
@@ -63,7 +64,7 @@ namespace CSharp3D.Forms.Utils
             }
             else
             {
-                float ood = 1.0f / rayDirection.Y;
+                float ood = 1.0f / rayDirection.Pitch;
                 float t1 = (boxMin.Y - rayOrigin.Y) * ood;
                 float t2 = (boxMax.Y - rayOrigin.Y) * ood;
                 if (t1 > t2) (t1, t2) = (t2, t1);
@@ -73,7 +74,7 @@ namespace CSharp3D.Forms.Utils
             }
 
             // Z-axis
-            if (Math.Abs(rayDirection.Z) < 1e-8)
+            if (Math.Abs(rayDirection.Yaw) < 1e-8)
             {
                 // The ray is parallel to Z
                 if (rayOrigin.Z < boxMin.Z || rayOrigin.Z > boxMax.Z)
@@ -84,7 +85,7 @@ namespace CSharp3D.Forms.Utils
             }
             else
             {
-                float ood = 1.0f / rayDirection.Z;
+                float ood = 1.0f / rayDirection.Yaw;
                 float t1 = (boxMin.Z - rayOrigin.Z) * ood;
                 float t2 = (boxMax.Z - rayOrigin.Z) * ood;
                 if (t1 > t2) (t1, t2) = (t2, t1);

@@ -35,9 +35,9 @@ namespace CSharp3D.Forms.Lights
         /// The location of the light in the scene.
         /// </summary>
         [Category("Position")]
-        [TypeConverter(typeof(Vector3TypeConverter))]
+        [TypeConverter(typeof(LocationVectorTypeConverter))]
         [Description("The location of the light in the scene, in World units (X, Y, z).")]
-        public Vector3 Location { get; set; } = new Vector3(0, 0, 0);
+        public LocationVector Location { get; set; } = new LocationVector(0, 0, 0);
 
         /// <summary>
         /// The color of the light.
@@ -79,7 +79,7 @@ namespace CSharp3D.Forms.Lights
 
         }
 
-        public PointLight(Vector3 location, Color color, float intensity)
+        public PointLight(LocationVector location, Color color, float intensity)
         {
             Location = location;
             Color = color;

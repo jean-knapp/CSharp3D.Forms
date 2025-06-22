@@ -11,17 +11,17 @@
         /// <summary>
         /// The X position in World units (left to right axis)
         /// </summary>
-        public float X { get; set; }
+        public float X;
 
         /// <summary>
         /// The Y position in World units (back to front axis)
         /// </summary>
-        public float Y { get; set; }
+        public float Y;
 
         /// <summary>
         /// The Z position in World units (bottom to top axis)
         /// </summary>
-        public float Z { get; set; }
+        public float Z;
 
         /// <summary>
         /// Creates a new location with the specified coordinates.

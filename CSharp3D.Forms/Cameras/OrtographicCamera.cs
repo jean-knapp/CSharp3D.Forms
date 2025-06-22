@@ -1,6 +1,7 @@
 ﻿using CSharp3D.Forms.Controls;
 using CSharp3D.Forms.Engine.Helpers;
 using CSharp3D.Forms.Utils;
+using CSharp3D.Forms.Engine;
 using OpenTK;
 using System;
 using System.ComponentModel;
@@ -19,17 +20,17 @@ namespace CSharp3D.Forms.Cameras
         /// The rotation of the camera, in degrees (Roll, Pitch, Yaw).
         /// </summary>
         [Category("Position")]
-        [TypeConverter(typeof(Vector3TypeConverter))]
+        [TypeConverter(typeof(RotationVectorTypeConverter))]
         [Description("The rotation of the camera, in degrees (Roll, Pitch, Yaw).")]
-        public Vector3 Rotation { get; set; } = new Vector3(0, 0, 0);
+        public RotationVector Rotation { get; set; } = new RotationVector(0, 0, 0);
 
         /// <summary>
         /// The distance from the camera to the origin, in World units.
         /// </summary>
         [Category("Position")]
-        [TypeConverter(typeof(Vector3TypeConverter))]
+        [TypeConverter(typeof(LocationVectorTypeConverter))]
         [Description("The location of the camera relative to the origin, in World units.")]
-        public Vector3 Location { get; set; } = new Vector3(0, 0, 0);
+        public LocationVector Location { get; set; } = new LocationVector(0, 0, 0);
 
         /// <summary>
         /// Whether to clamp the vertical rotation of the camera to 90 degrees.
@@ -51,7 +52,7 @@ namespace CSharp3D.Forms.Cameras
             Projection = Projections.Ortographic;
         }
 
-        public OrtographicCamera(Vector3 direction, Vector3 location)
+        public OrtographicCamera(RotationVector direction, LocationVector location)
         {
             Rotation = direction;
             Location = location;
@@ -101,7 +102,7 @@ namespace CSharp3D.Forms.Cameras
         /// <param name="controlWidth"> The width of the control. </param>
         /// <param name="controlHeight"> The height of the control. </param>
         /// <returns> The rotation of the camera, in degrees (Roll, Pitch, Yaw). </returns>
-        public Vector3 GetRotation(RendererControl rendererControl)
+        public RotationVector GetRotation(RendererControl rendererControl)
         {
             return Rotation;
         }
@@ -112,10 +113,10 @@ namespace CSharp3D.Forms.Cameras
         /// <param name="controlWidth"> The width of the control. </param>
         /// <param name="controlHeight"> The height of the control. </param>
         /// <returns> The position of the camera, in World units (X, Y, Z). </returns>
-        public override Vector3 GetLocation(RendererControl rendererControl)
+        public override LocationVector GetLocation(RendererControl rendererControl)
         {
             // Start with whatever our camera's "base" location is
-            Vector3 location = Location;
+            LocationVector location = Location;
 
             if (IsMiddleMouseButtonDown)
             {
@@ -192,7 +193,7 @@ namespace CSharp3D.Forms.Cameras
             // 5) Adjust the camera Location so that oldWorldPos is still under the mouse
             // That means we translate the camera by the difference:
             Vector2 worldOffset = oldWorldPos - newWorldPos;
-            Location = new Vector3(
+            Location = new LocationVector(
                 Location.X + worldOffset.X,
                 Location.Y + worldOffset.Y,
                 Location.Z

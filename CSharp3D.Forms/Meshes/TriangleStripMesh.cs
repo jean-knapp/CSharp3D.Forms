@@ -1,4 +1,5 @@
-﻿using OpenTK;
+﻿using CSharp3D.Forms.Engine;
+using OpenTK;
 using System.ComponentModel;
 
 namespace CSharp3D.Forms.Meshes
@@ -18,7 +19,7 @@ namespace CSharp3D.Forms.Meshes
 
         }
 
-        public TriangleStripMesh(Vector3 position, Vector3 rotation) : base(position, rotation)
+        public TriangleStripMesh(LocationVector position, RotationVector rotation) : base(position, rotation)
         {
 
         }

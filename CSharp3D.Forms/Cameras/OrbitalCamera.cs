@@ -1,4 +1,5 @@
 ﻿using CSharp3D.Forms.Controls;
+using CSharp3D.Forms.Engine;
 using CSharp3D.Forms.Engine.Helpers;
 using CSharp3D.Forms.Utils;
 using OpenTK;
@@ -20,9 +21,9 @@ namespace CSharp3D.Forms.Cameras
         /// The rotation of the camera, in degrees (Roll, Pitch, Yaw).
         /// </summary>
         [Category("Position")]
-        [TypeConverter(typeof(Vector3TypeConverter))]
+        [TypeConverter(typeof(RotationVectorTypeConverter))]
         [Description("The rotation of the camera, in degrees (Roll, Pitch, Yaw).")]
-        public Vector3 Rotation { get; set; } = new Vector3(0, 0, 0);
+        public RotationVector Rotation { get; set; } = new RotationVector(0, 0, 0);
 
         /// <summary>
         /// The distance from the camera to the origin, in World units.
@@ -42,7 +43,7 @@ namespace CSharp3D.Forms.Cameras
         {
         }
 
-        public OrbitalCamera(Vector3 direction, float distance)
+        public OrbitalCamera(RotationVector direction, float distance)
         {
             Rotation = direction;
             Distance = distance;
@@ -50,7 +51,7 @@ namespace CSharp3D.Forms.Cameras
 
         public override Matrix4 GetViewMatrix(RendererControl rendererControl)
         {
-            Vector3 location = VectorOrientation.ToGL(new Vector3(-Distance, 0, 0)) * -1;
+            Vector3 location = VectorOrientation.ToGL(new LocationVector(-Distance, 0, 0)) * -1;
             Vector3 rotation = VectorOrientation.ToGL(GetRotation(rendererControl)) * -1 * MathHelper.Pi / 180f;
 
             Quaternion qPitch = Quaternion.FromAxisAngle(Vector3.UnitX, rotation.X);
@@ -66,23 +67,23 @@ namespace CSharp3D.Forms.Cameras
         /// <param name="controlWidth"> The width of the control. </param>
         /// <param name="controlHeight"> The height of the control. </param>
         /// <returns> The rotation of the camera, in degrees (Roll, Pitch, Yaw). </returns>
-        public Vector3 GetRotation(RendererControl rendererControl)
+        public RotationVector GetRotation(RendererControl rendererControl)
         {
             var mouseDelta = GetMouseDelta();
-            Vector3 rotation = Rotation;
+            RotationVector rotation = Rotation;
 
             if (IsMouseDown)
             {
-                rotation = rotation + new Vector3(0, 2 * mouseDelta.Y * FOV / rendererControl.Height, 2 * mouseDelta.X * FOV / rendererControl.Width);
+                rotation = rotation + new RotationVector(0, 2 * mouseDelta.Y * FOV / rendererControl.Height, 2 * mouseDelta.X * FOV / rendererControl.Width);
 
                 if (!ClampVertically)
                 {
-                    rotation.Y = MathHelper.Clamp(rotation.Y, -90, 90);
+                    rotation.Pitch = MathHelper.Clamp(rotation.Pitch, -90, 90);
                 }
 
-                rotation.X = (rotation.X + 180) % 360 - 180;
-                rotation.Y = (rotation.Y + 180) % 360 - 180;
-                rotation.Z = (rotation.Z + 180) % 360 - 180;
+                rotation.Roll = (rotation.Roll + 180) % 360 - 180;
+                rotation.Pitch = (rotation.Pitch + 180) % 360 - 180;
+                rotation.Yaw = (rotation.Yaw + 180) % 360 - 180;
 
                 RecenterMouse(rendererControl);
             }
@@ -96,16 +97,16 @@ namespace CSharp3D.Forms.Cameras
         /// <param name="controlWidth"> The width of the control. </param>
         /// <param name="controlHeight"> The height of the control. </param>
         /// <returns> The position of the camera, in World units (X, Y, Z). </returns>
-        public override Vector3 GetLocation(RendererControl rendererControl)
+        public override LocationVector GetLocation(RendererControl rendererControl)
         {
             var rot = GetRotation(rendererControl);
 
-            float x = Distance * (float)Math.Cos((rot.Z + 180) * Math.PI / 180f) * (float)Math.Cos((rot.Y) * Math.PI / 180f);
-            float y = Distance * (float)Math.Sin((rot.Z + 180) * Math.PI / 180f) * (float)Math.Cos((rot.Y) * Math.PI / 180f);
-            float z = Distance * (float)Math.Sin((rot.Y) * Math.PI / 180f);
+            float x = Distance * (float)Math.Cos((rot.Yaw + 180) * Math.PI / 180f) * (float)Math.Cos((rot.Pitch) * Math.PI / 180f);
+            float y = Distance * (float)Math.Sin((rot.Yaw + 180) * Math.PI / 180f) * (float)Math.Cos((rot.Pitch) * Math.PI / 180f);
+            float z = Distance * (float)Math.Sin((rot.Pitch) * Math.PI / 180f);
 
             // Calculate the camera position
-            return new Vector3(x, y, z);
+            return new LocationVector(x, y, z);
         }
 
         public override void MouseDown(RendererControl rendererControl, MouseButtons button)

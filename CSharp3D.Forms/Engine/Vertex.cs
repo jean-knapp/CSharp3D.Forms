@@ -59,5 +59,10 @@ namespace CSharp3D.Forms.Engine
             U = textureCoords.X;
             V = textureCoords.Y;
         }
+
+        public static Vertex Multiply(Vertex vertex, Vector3 scale)
+        {
+            return new Vertex(vertex.X * scale.X, vertex.Y * scale.Y, vertex.Z * scale.Z, vertex.U, vertex.V);
+        }
     }
 }

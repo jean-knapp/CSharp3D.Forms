@@ -59,17 +59,17 @@ namespace CSharp3D.Forms.Meshes
         /// X is the east direction, Y is the north direction, Z is the up direction.
         /// </summary>
         [Category("Mesh")]
-        [TypeConverter(typeof(Vector3TypeConverter))]
+        [TypeConverter(typeof(LocationVectorTypeConverter))]
         [Description("The position of the origin of the mesh, in World units (X, Y, Z).")]
-        public Vector3 Location { get; set; }
+        public LocationVector Location { get; set; }
 
         /// <summary>
         /// X is the roll clockwise, Y is the pitch down, Z is the yaw counter-clockwise.
         /// </summary>
         [Category("Mesh")]
-        [TypeConverter(typeof(Vector3TypeConverter))]
+        [TypeConverter(typeof(RotationVectorTypeConverter))]
         [Description("The rotation of the mesh, in degrees (Roll, Pitch, Yaw).")]
-        public Vector3 Rotation { get; set; }
+        public RotationVector Rotation { get; set; }
 
         [Category("Mesh")]
         [Description("The material of the mesh.")]
@@ -83,11 +83,11 @@ namespace CSharp3D.Forms.Meshes
 
         public Mesh()
         {
-            Location = new Vector3(0, 0, 0);
-            Rotation = new Vector3(0, 0, 0);
+            Location = new LocationVector(0, 0, 0);
+            Rotation = new RotationVector(0, 0, 0);
         }
 
-        public Mesh(Vector3 location, Vector3 rotation)
+        public Mesh(LocationVector location, RotationVector rotation)
         {
             Location = location;
             Rotation = rotation;
@@ -340,7 +340,7 @@ namespace CSharp3D.Forms.Meshes
                 }
                 else
                 {
-                    GL.Uniform3(lightPositionLocation, VectorOrientation.ToGL(new Vector3(0, 0, 0)));
+                    GL.Uniform3(lightPositionLocation, Vector3.Zero);
                     GL.Uniform4(lightColorLocation, new Vector4(1.0f, 1.0f, 1.0f, 0.0f));
                     GL.Uniform4(ambientColorLocation, Material.Unlit ? new Vector4(1, 1, 1, 1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity));
                     GL.Uniform3(lightAttenuationLocation, new Vector3(1.0f, 0.0f, 0.0f));
@@ -376,13 +376,13 @@ namespace CSharp3D.Forms.Meshes
         /// </summary>
         /// <param name="cameraPosition"> The camera's position. </param>
         /// <returns> The distance of the mesh's origin to the camera. </returns>
-        public float GetDistanceFromCamera(Vector3 cameraPosition)
+        public float GetDistanceFromCamera(LocationVector cameraPosition)
         {
-            Vector3 meshPosition = Location; // Assuming Location is the mesh's world position
+            LocationVector meshPosition = Location; // Assuming Location is the mesh's world position
             return (meshPosition - cameraPosition).Length;
         }
 
-        public Vector3 BoxMin, BoxMax;  // store in your Mesh class
+        public LocationVector BoxMin, BoxMax;  // store in your Mesh class
 
         private void ComputeBoundingBox(Mesh mesh)
         {
@@ -425,8 +425,8 @@ namespace CSharp3D.Forms.Meshes
                 if (worldPos.Z > max.Z) max.Z = worldPos.Z;
             }
 
-            mesh.BoxMin = VectorOrientation.ToWorld(min);
-            mesh.BoxMax = VectorOrientation.ToWorld(max);
+            mesh.BoxMin = VectorOrientation.ToWorldLocation(min);
+            mesh.BoxMax = VectorOrientation.ToWorldLocation(max);
         }
     }
 }

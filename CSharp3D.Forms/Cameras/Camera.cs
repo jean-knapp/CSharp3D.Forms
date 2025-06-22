@@ -137,7 +137,7 @@ namespace CSharp3D.Forms.Cameras
         /// </summary>
         /// <param name="viewMatrix"> The view matrix of the camera. </param>
         /// <returns> The rotation of the camera, in degrees (Roll, Pitch, Yaw). </returns>
-        public static Vector3 GetRotation(Matrix4 viewMatrix)
+        public static RotationVector GetRotation(Matrix4 viewMatrix)
         {
             // Step 2: Extract the upper-left 3x3 matrix (rotation part)
             Matrix3 rotationMatrix = new Matrix3(
@@ -166,7 +166,7 @@ namespace CSharp3D.Forms.Cameras
                 new Vector3(-1, 0, 0)
             ) * -1 * 180 / MathHelper.Pi;
 
-            return new Vector3(rotation.X, rotation.Y, rotation.Z);
+            return new RotationVector(rotation.X, rotation.Y, rotation.Z);
         }
 
         /// <summary>
@@ -174,8 +174,9 @@ namespace CSharp3D.Forms.Cameras
         /// </summary>
         /// <param name="viewMatrix"> The view matrix of the camera. </param>
         /// <returns> The location of the camera, in World units (X, Y, Z). </returns>
-        public static Vector3 GetLocation(Matrix4 viewMatrix)
+        public static LocationVector GetLocation(Matrix4 viewMatrix)
         {
+            // TODO this can be simplified by working with the LocationVector directly.
             Vector3 rotation = VectorOrientation.ToGL(GetRotation(viewMatrix)) * MathHelper.Pi / 180f;
             float distance = GetDistanceFromOrigin(viewMatrix);
 
@@ -186,7 +187,7 @@ namespace CSharp3D.Forms.Cameras
             Matrix4 rotationMatrix = pitchMatrix * yawMatrix * rollMatrix;
 
             Vector3 forward = new Vector3(0, 0, distance);
-            Vector3 position = VectorOrientation.ToWorld(Vector3.Transform(forward, new Matrix3(rotationMatrix)));
+            LocationVector position = VectorOrientation.ToWorldLocation(Vector3.Transform(forward, new Matrix3(rotationMatrix)));
 
             return position;
         }
@@ -197,9 +198,9 @@ namespace CSharp3D.Forms.Cameras
         /// <param name="controlWidth"> The width of the control. </param>
         /// <param name="controlHeight"> The height of the control. </param>
         /// <returns> The position of the camera, in World units (X, Y, Z). </returns>
-        public virtual Vector3 GetLocation(RendererControl rendererControl)
+        public virtual LocationVector GetLocation(RendererControl rendererControl)
         {
-            return Vector3.Zero;
+            return LocationVector.Origin;
         }
 
         /// <summary>
@@ -256,14 +257,14 @@ namespace CSharp3D.Forms.Cameras
             // Make a Vector3 for direction, and normalize
             Vector3 rayDirection = new Vector3(rayWorld4.X, rayWorld4.Y, rayWorld4.Z);
             rayDirection.Normalize();
-            rayDirection = VectorOrientation.ToWorld(rayDirection);
+            RotationVector rayDirectionW = VectorOrientation.ToWorldRotation(rayDirection);
 
             // 5. Get the camera position as the ray origin
             //    (assuming an OrbitalCamera or similar)
-            Vector3 cameraPosition = GetLocation(rendererControl);
+            LocationVector cameraPosition = GetLocation(rendererControl);
 
             // Now we have a "picking ray" in world space:
-            Ray pickingRay = new Ray(cameraPosition, rayDirection);
+            Ray pickingRay = new Ray(cameraPosition, rayDirectionW);
 
             return pickingRay;
         }
