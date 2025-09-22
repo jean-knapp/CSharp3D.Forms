@@ -24,6 +24,7 @@ namespace CSharp3D.Forms.Utils
             public List<GLTFMesh> Meshes { get; set; } = new List<GLTFMesh>();
             public List<GLTFMaterial> Materials { get; set; } = new List<GLTFMaterial>();
             public List<GLTFTexture> Textures { get; set; } = new List<GLTFTexture>();
+            public List<GLTFImage> Images { get; set; } = new List<GLTFImage>();
             public List<GLTFAccessor> Accessors { get; set; } = new List<GLTFAccessor>();
             public List<GLTFBufferView> BufferViews { get; set; } = new List<GLTFBufferView>();
             public List<GLTFBuffer> Buffers { get; set; } = new List<GLTFBuffer>();
@@ -56,6 +57,18 @@ namespace CSharp3D.Forms.Utils
         }
 
         /// <summary>
+        /// GLTF image data.
+        /// </summary>
+        public class GLTFImage
+        {
+            public string Name { get; set; }
+            public string Uri { get; set; }
+            public string FilePath { get; set; }
+            public byte[] Data { get; set; }
+            public int MimeType { get; set; } = -1; // 0 = image/jpeg, 1 = image/png
+        }
+
+        /// <summary>
         /// GLTF texture data.
         /// </summary>
         public class GLTFTexture
@@ -63,6 +76,7 @@ namespace CSharp3D.Forms.Utils
             public string Name { get; set; }
             public string ImagePath { get; set; }
             public int SourceIndex { get; set; }
+            public GLTFImage Image { get; set; }
         }
 
         /// <summary>
@@ -156,6 +170,17 @@ namespace CSharp3D.Forms.Utils
                         {
                             var material = ParseMaterial(materialElement);
                             data.Materials.Add(material);
+                        }
+                    }
+
+                    // Parse images
+                    if (root.TryGetProperty("images", out var imagesArray))
+                    {
+                        Console.WriteLine($"Found {imagesArray.GetArrayLength()} images");
+                        foreach (var imageElement in imagesArray.EnumerateArray())
+                        {
+                            var image = ParseImage(imageElement, data);
+                            data.Images.Add(image);
                         }
                     }
 
@@ -392,6 +417,79 @@ namespace CSharp3D.Forms.Utils
         }
 
         /// <summary>
+        /// Parses an image from JSON.
+        /// </summary>
+        private static GLTFImage ParseImage(JsonElement imageElement, GLTFData data)
+        {
+            var image = new GLTFImage();
+
+            if (imageElement.TryGetProperty("name", out var nameElement))
+            {
+                image.Name = nameElement.GetString();
+            }
+
+            if (imageElement.TryGetProperty("uri", out var uriElement))
+            {
+                var uri = uriElement.GetString();
+                image.Uri = uri;
+
+                if (uri.StartsWith("data:"))
+                {
+                    // Handle data URI (base64 encoded data)
+                    var dataUri = uri.Substring(uri.IndexOf(',') + 1);
+                    image.Data = Convert.FromBase64String(dataUri);
+                    Console.WriteLine($"Loaded embedded image data: {image.Data.Length} bytes");
+                }
+                else
+                {
+                    // Handle external file
+                    image.FilePath = Path.Combine(data.BasePath, uri);
+                    Console.WriteLine($"Looking for image file: {image.FilePath}");
+                    
+                    if (File.Exists(image.FilePath))
+                    {
+                        image.Data = File.ReadAllBytes(image.FilePath);
+                        Console.WriteLine($"Loaded image file: {image.FilePath} ({image.Data.Length} bytes)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Image file not found: {image.FilePath}");
+                    }
+                }
+            }
+            else if (imageElement.TryGetProperty("bufferView", out var bufferViewElement))
+            {
+                // Handle image data stored in buffer
+                var bufferViewIndex = bufferViewElement.GetInt32();
+                if (bufferViewIndex >= 0 && bufferViewIndex < data.BufferViews.Count)
+                {
+                    var bufferView = data.BufferViews[bufferViewIndex];
+                    var buffer = data.Buffers[bufferView.Buffer];
+                    
+                    if (buffer.Data != null)
+                    {
+                        var offset = bufferView.ByteOffset;
+                        var length = bufferView.ByteLength;
+                        image.Data = new byte[length];
+                        Array.Copy(buffer.Data, offset, image.Data, 0, length);
+                        Console.WriteLine($"Loaded image from buffer: {image.Data.Length} bytes");
+                    }
+                }
+            }
+
+            if (imageElement.TryGetProperty("mimeType", out var mimeTypeElement))
+            {
+                var mimeType = mimeTypeElement.GetString();
+                if (mimeType == "image/jpeg")
+                    image.MimeType = 0;
+                else if (mimeType == "image/png")
+                    image.MimeType = 1;
+            }
+
+            return image;
+        }
+
+        /// <summary>
         /// Parses a texture from JSON.
         /// </summary>
         private static GLTFTexture ParseTexture(JsonElement textureElement, GLTFData data)
@@ -406,6 +504,13 @@ namespace CSharp3D.Forms.Utils
             if (textureElement.TryGetProperty("source", out var sourceElement))
             {
                 texture.SourceIndex = sourceElement.GetInt32();
+                
+                // Link to the corresponding image
+                if (texture.SourceIndex >= 0 && texture.SourceIndex < data.Images.Count)
+                {
+                    texture.Image = data.Images[texture.SourceIndex];
+                    texture.ImagePath = texture.Image.FilePath;
+                }
             }
 
             return texture;
