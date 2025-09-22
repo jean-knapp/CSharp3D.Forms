@@ -100,6 +100,8 @@ namespace CSharp3D.Forms.Cameras
         public override LocationVector GetLocation(RendererControl rendererControl)
         {
             var rot = GetRotation(rendererControl);
+            if (rot == null)
+                return new LocationVector(0, 0, 0);
 
             float x = Distance * (float)Math.Cos((rot.Yaw + 180) * Math.PI / 180f) * (float)Math.Cos((rot.Pitch) * Math.PI / 180f);
             float y = Distance * (float)Math.Sin((rot.Yaw + 180) * Math.PI / 180f) * (float)Math.Cos((rot.Pitch) * Math.PI / 180f);

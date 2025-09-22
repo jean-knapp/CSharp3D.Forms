@@ -239,6 +239,8 @@ namespace CSharp3D.Forms.Controls
                 return;
             }
 
+            GL.ClearColor(BackColor.R / 255f, BackColor.G / 255f, BackColor.B / 255f, BackColor.A / 255f);
+
             if (Camera == null)
                 throw new CameraNotSetException();
 

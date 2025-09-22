@@ -14,6 +14,9 @@ namespace CSharp3D.Forms.Engine.Helpers
         /// <returns> The vertex in OpenGL units. </returns>
         public static Vector3 ToGL(RotationVector vertex)
         {
+            if (vertex == null)
+                return new Vector3(0, 0, 0);
+
             return vertex.ToVector3() * new Matrix3(
                 new Vector3(0, 0, -1),
                 new Vector3(-1, 0, 0),
