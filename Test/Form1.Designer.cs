@@ -36,8 +36,10 @@
             this.orbitalCamera2 = new CSharp3D.Forms.Cameras.OrbitalCamera();
             this.gltfMesh1 = new CSharp3D.Forms.Meshes.GLTFMesh();
             this.material1 = new CSharp3D.Forms.Engine.Material();
+            this.pointLight1 = new CSharp3D.Forms.Lights.PointLight();
             ((System.ComponentModel.ISupportInitialize)(this.gridMesh1)).BeginInit();
             ((System.ComponentModel.ISupportInitialize)(this.gltfMesh1)).BeginInit();
+            ((System.ComponentModel.ISupportInitialize)(this.pointLight1)).BeginInit();
             this.SuspendLayout();
             // 
             // rendererControl1
@@ -65,7 +67,7 @@
             // scene1
             // 
             this.scene1.AmbientColor = System.Drawing.Color.White;
-            this.scene1.AmbientIntensity = 0.8F;
+            this.scene1.AmbientIntensity = 0.5F;
             this.scene1.ShaderDirectory = "shaders/";
             // 
             // gridMesh1
@@ -112,6 +114,16 @@
             this.material1.Translucent = false;
             this.material1.Unlit = false;
             // 
+            // pointLight1
+            // 
+            this.pointLight1.Color = System.Drawing.Color.White;
+            this.pointLight1.Constant = 0F;
+            this.pointLight1.Intensity = 10F;
+            this.pointLight1.Linear = 0F;
+            this.pointLight1.Location = ((CSharp3D.Forms.Engine.LocationVector)(resources.GetObject("pointLight1.Location")));
+            this.pointLight1.Quadratic = 1F;
+            this.pointLight1.Scene = this.scene1;
+            // 
             // Form1
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
@@ -122,6 +134,7 @@
             this.Text = "Form1";
             ((System.ComponentModel.ISupportInitialize)(this.gridMesh1)).EndInit();
             ((System.ComponentModel.ISupportInitialize)(this.gltfMesh1)).EndInit();
+            ((System.ComponentModel.ISupportInitialize)(this.pointLight1)).EndInit();
             this.ResumeLayout(false);
 
         }
@@ -135,5 +148,6 @@
         private CSharp3D.Forms.Cameras.OrbitalCamera orbitalCamera2;
         private CSharp3D.Forms.Meshes.GLTFMesh gltfMesh1;
         private CSharp3D.Forms.Engine.Material material1;
+        private CSharp3D.Forms.Lights.PointLight pointLight1;
     }
 }

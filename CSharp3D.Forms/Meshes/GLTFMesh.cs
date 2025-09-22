@@ -31,7 +31,6 @@ namespace CSharp3D.Forms.Meshes
         private string _filePath = "";
         private bool _isLoaded = false;
         private GLTFParser.GLTFData _gltfData;
-        private List<Material> _extractedMaterials = new List<Material>();
 
         /// <summary>
         /// The file path to the GLTF file.
@@ -48,7 +47,6 @@ namespace CSharp3D.Forms.Meshes
                     _filePath = value;
                     _isLoaded = false;
                     _gltfData = null;
-                    _extractedMaterials.Clear();
                     
                     if (!string.IsNullOrEmpty(_filePath) && File.Exists(_filePath))
                     {
@@ -73,14 +71,6 @@ namespace CSharp3D.Forms.Meshes
         [Description("The number of meshes loaded from the GLTF file.")]
         [Browsable(false)]
         public int MeshCount => _gltfData?.Meshes.Count ?? 0;
-
-        /// <summary>
-        /// The number of materials extracted from the GLTF file.
-        /// </summary>
-        [Category("GLTF")]
-        [Description("The number of materials extracted from the GLTF file.")]
-        [Browsable(false)]
-        public int MaterialCount => _extractedMaterials.Count;
 
         public GLTFMesh() : base()
         {
@@ -108,7 +98,6 @@ namespace CSharp3D.Forms.Meshes
 
                 // Clear existing data
                 _gltfData = null;
-                _extractedMaterials.Clear();
 
                 // Parse GLTF file
                 _gltfData = GLTFParser.ParseGLTF(_filePath);
@@ -132,6 +121,8 @@ namespace CSharp3D.Forms.Meshes
         {
             if (_gltfData?.Materials == null) return;
 
+            List<Material> _extractedMaterials = new List<Material>();
+
             foreach (var gltfMaterial in _gltfData.Materials)
             {
                 var material = new Material
@@ -139,7 +130,7 @@ namespace CSharp3D.Forms.Meshes
                     ShaderName = "Generic",
                     Color = gltfMaterial.BaseColor,
                     Alpha = gltfMaterial.BaseColor.A / 255.0f,
-                    SpecularStrength = gltfMaterial.Metallic
+                    SpecularStrength = 0.5f
                 };
 
                 // Load textures from GLTF data
@@ -170,35 +161,61 @@ namespace CSharp3D.Forms.Meshes
         /// </summary>
         private void LoadMaterialTextures(Material material, GLTFParser.GLTFMaterial gltfMaterial)
         {
+            Console.WriteLine($"Loading textures for material: {gltfMaterial.Name}");
+            Console.WriteLine($"  BaseColorTextureIndex: {gltfMaterial.BaseColorTextureIndex}");
+            Console.WriteLine($"  NormalTextureIndex: {gltfMaterial.NormalTextureIndex}");
+            Console.WriteLine($"  MetallicRoughnessTextureIndex: {gltfMaterial.MetallicRoughnessTextureIndex}");
+            Console.WriteLine($"  Available textures: {_gltfData.Textures.Count}");
+
             // Load base color texture (albedo)
             if (gltfMaterial.BaseColorTextureIndex >= 0 && gltfMaterial.BaseColorTextureIndex < _gltfData.Textures.Count)
             {
+                Console.WriteLine($"Loading albedo texture from index {gltfMaterial.BaseColorTextureIndex}");
                 var texture = CreateTextureFromGLTF(_gltfData.Textures[gltfMaterial.BaseColorTextureIndex]);
                 if (texture != null)
                 {
                     material.Albedo = texture;
+                    Console.WriteLine($"  Albedo texture loaded: {texture.Bitmap?.Width}x{texture.Bitmap?.Height}");
+                }
+                else
+                {
+                    Console.WriteLine($"  Failed to load albedo texture");
                 }
             }
 
             // Load normal texture
             if (gltfMaterial.NormalTextureIndex >= 0 && gltfMaterial.NormalTextureIndex < _gltfData.Textures.Count)
             {
+                Console.WriteLine($"Loading normal texture from index {gltfMaterial.NormalTextureIndex}");
                 var texture = CreateTextureFromGLTF(_gltfData.Textures[gltfMaterial.NormalTextureIndex]);
                 if (texture != null)
                 {
                     material.Normal = texture;
+                    Console.WriteLine($"  Normal texture loaded: {texture.Bitmap?.Width}x{texture.Bitmap?.Height}");
+                }
+                else
+                {
+                    Console.WriteLine($"  Failed to load normal texture");
                 }
             }
 
             // Load metallic/roughness texture as specular
             if (gltfMaterial.MetallicRoughnessTextureIndex >= 0 && gltfMaterial.MetallicRoughnessTextureIndex < _gltfData.Textures.Count)
             {
+                Console.WriteLine($"Loading specular texture from index {gltfMaterial.MetallicRoughnessTextureIndex}");
                 var texture = CreateTextureFromGLTF(_gltfData.Textures[gltfMaterial.MetallicRoughnessTextureIndex]);
                 if (texture != null)
                 {
                     material.Specular = texture;
+                    Console.WriteLine($"  Specular texture loaded: {texture.Bitmap?.Width}x{texture.Bitmap?.Height}");
+                }
+                else
+                {
+                    Console.WriteLine($"  Failed to load specular texture");
                 }
             }
+
+            material.SpecularStrength = 0.5f;
         }
 
         /// <summary>
@@ -284,27 +301,6 @@ namespace CSharp3D.Forms.Meshes
         }
 
         /// <summary>
-        /// Gets the material for a specific mesh index.
-        /// </summary>
-        /// <param name="meshIndex">The mesh index</param>
-        /// <returns>The material for the mesh</returns>
-        public Material GetMaterialForMesh(int meshIndex)
-        {
-            if (!_isLoaded || _gltfData?.Meshes == null || meshIndex < 0 || meshIndex >= _gltfData.Meshes.Count)
-            {
-                return Material;
-            }
-
-            var materialIndex = _gltfData.Meshes[meshIndex].MaterialIndex;
-            if (materialIndex >= 0 && materialIndex < _extractedMaterials.Count)
-            {
-                return _extractedMaterials[materialIndex];
-            }
-
-            return Material;
-        }
-
-        /// <summary>
         /// Reloads the GLTF file.
         /// </summary>
         public void Reload()
@@ -333,180 +329,6 @@ namespace CSharp3D.Forms.Meshes
                 // After GLTF is loaded, ignore user attempts to change material
                 // The material will be automatically set from GLTF data
             }
-        }
-
-        /// <summary>
-        /// Gets the name of a specific mesh.
-        /// </summary>
-        /// <param name="meshIndex">The mesh index</param>
-        /// <returns>The name of the mesh</returns>
-        public string GetMeshName(int meshIndex)
-        {
-            if (!_isLoaded || _gltfData?.Meshes == null || meshIndex < 0 || meshIndex >= _gltfData.Meshes.Count)
-            {
-                return "Unknown";
-            }
-
-            return _gltfData.Meshes[meshIndex].Name ?? $"Mesh_{meshIndex}";
-        }
-
-        /// <summary>
-        /// Gets the name of a specific material.
-        /// </summary>
-        /// <param name="materialIndex">The material index</param>
-        /// <returns>The name of the material</returns>
-        public string GetMaterialName(int materialIndex)
-        {
-            if (!_isLoaded || _gltfData?.Materials == null || materialIndex < 0 || materialIndex >= _gltfData.Materials.Count)
-            {
-                return "Unknown";
-            }
-
-            return _gltfData.Materials[materialIndex].Name ?? $"Material_{materialIndex}";
-        }
-
-        /// <summary>
-        /// Gets all mesh names from the GLTF file.
-        /// </summary>
-        /// <returns>Array of mesh names</returns>
-        public string[] GetMeshNames()
-        {
-            if (!_isLoaded || _gltfData?.Meshes == null)
-            {
-                return new string[0];
-            }
-
-            return _gltfData.Meshes.Select((mesh, index) => mesh.Name ?? $"Mesh_{index}").ToArray();
-        }
-
-        /// <summary>
-        /// Gets all material names from the GLTF file.
-        /// </summary>
-        /// <returns>Array of material names</returns>
-        public string[] GetMaterialNames()
-        {
-            if (!_isLoaded || _gltfData?.Materials == null)
-            {
-                return new string[0];
-            }
-
-            return _gltfData.Materials.Select((material, index) => material.Name ?? $"Material_{index}").ToArray();
-        }
-
-        /// <summary>
-        /// Sets the material for a specific mesh.
-        /// </summary>
-        /// <param name="meshIndex">The mesh index</param>
-        /// <param name="materialIndex">The material index to use</param>
-        public void SetMeshMaterial(int meshIndex, int materialIndex)
-        {
-            if (!_isLoaded || _gltfData?.Meshes == null || meshIndex < 0 || meshIndex >= _gltfData.Meshes.Count)
-            {
-                return;
-            }
-
-            if (materialIndex >= 0 && materialIndex < _extractedMaterials.Count)
-            {
-                _gltfData.Meshes[meshIndex].MaterialIndex = materialIndex;
-            }
-        }
-
-        /// <summary>
-        /// Gets information about the loaded GLTF file.
-        /// </summary>
-        /// <returns>A string containing information about the loaded GLTF file</returns>
-        public string GetGLTFInfo()
-        {
-            if (!_isLoaded)
-            {
-                return "No GLTF file loaded.";
-            }
-
-            var info = new System.Text.StringBuilder();
-            info.AppendLine($"GLTF File: {Path.GetFileName(_filePath)}");
-            info.AppendLine($"Meshes: {MeshCount}");
-            info.AppendLine($"Materials: {MaterialCount}");
-            info.AppendLine($"Textures: {_gltfData?.Textures.Count ?? 0}");
-            info.AppendLine($"Images: {_gltfData?.Images.Count ?? 0}");
-            
-            if (MeshCount > 0)
-            {
-                info.AppendLine("\nMesh Names:");
-                for (int i = 0; i < MeshCount; i++)
-                {
-                    info.AppendLine($"  {i}: {GetMeshName(i)}");
-                }
-            }
-            
-            if (MaterialCount > 0)
-            {
-                info.AppendLine("\nMaterial Names:");
-                for (int i = 0; i < MaterialCount; i++)
-                {
-                    var material = _extractedMaterials[i];
-                    info.AppendLine($"  {i}: {GetMaterialName(i)}");
-                    info.AppendLine($"    - Albedo Texture: {(material.Albedo != null ? "Yes" : "No")}");
-                    info.AppendLine($"    - Normal Texture: {(material.Normal != null ? "Yes" : "No")}");
-                    info.AppendLine($"    - Specular Texture: {(material.Specular != null ? "Yes" : "No")}");
-                }
-            }
-
-            if (_gltfData?.Textures.Count > 0)
-            {
-                info.AppendLine("\nTexture Names:");
-                for (int i = 0; i < _gltfData.Textures.Count; i++)
-                {
-                    var texture = _gltfData.Textures[i];
-                    info.AppendLine($"  {i}: {texture.Name ?? "Unnamed"} - {(texture.Image != null ? "Loaded" : "Not Loaded")}");
-                }
-            }
-
-            return info.ToString();
-        }
-
-        /// <summary>
-        /// Gets the number of textures loaded from the GLTF file.
-        /// </summary>
-        [Category("GLTF")]
-        [Description("The number of textures loaded from the GLTF file.")]
-        [Browsable(false)]
-        public int TextureCount => _gltfData?.Textures.Count ?? 0;
-
-        /// <summary>
-        /// Gets the number of images loaded from the GLTF file.
-        /// </summary>
-        [Category("GLTF")]
-        [Description("The number of images loaded from the GLTF file.")]
-        [Browsable(false)]
-        public int ImageCount => _gltfData?.Images.Count ?? 0;
-
-        /// <summary>
-        /// Gets the name of a specific texture.
-        /// </summary>
-        /// <param name="textureIndex">The texture index</param>
-        /// <returns>The name of the texture</returns>
-        public string GetTextureName(int textureIndex)
-        {
-            if (!_isLoaded || _gltfData?.Textures == null || textureIndex < 0 || textureIndex >= _gltfData.Textures.Count)
-            {
-                return "Unknown";
-            }
-
-            return _gltfData.Textures[textureIndex].Name ?? $"Texture_{textureIndex}";
-        }
-
-        /// <summary>
-        /// Gets all texture names from the GLTF file.
-        /// </summary>
-        /// <returns>Array of texture names</returns>
-        public string[] GetTextureNames()
-        {
-            if (!_isLoaded || _gltfData?.Textures == null)
-            {
-                return new string[0];
-            }
-
-            return _gltfData.Textures.Select((texture, index) => texture.Name ?? $"Texture_{index}").ToArray();
         }
     }
 }

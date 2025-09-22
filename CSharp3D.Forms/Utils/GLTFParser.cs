@@ -251,37 +251,7 @@ namespace CSharp3D.Forms.Utils
                     }
                     else
                     {
-                        // Try alternative file names based on the GLTF file name
-                        var gltfFileName = Path.GetFileNameWithoutExtension(Path.GetDirectoryName(basePath));
-                        var alternativeNames = new[]
-                        {
-                            Path.Combine(basePath, $"{gltfFileName}.bin"),
-                            Path.Combine(basePath, "A-29.bin"), // Your specific case
-                            Path.Combine(basePath, uri.Replace("result.bin", "A-29.bin")),
-                            Path.Combine(basePath, "result.bin") // Original name
-                        };
-                        
-                        Console.WriteLine($"File not found, trying alternatives:");
-                        foreach (var altPath in alternativeNames)
-                        {
-                            Console.WriteLine($"  Trying: {altPath}");
-                            if (File.Exists(altPath))
-                            {
-                                buffer.Data = File.ReadAllBytes(altPath);
-                                Console.WriteLine($"  Found binary file at: {altPath} ({buffer.Data.Length} bytes)");
-                                break;
-                            }
-                        }
-                        
-                        if (buffer.Data == null)
-                        {
-                            Console.WriteLine($"Could not find any binary file!");
-                            Console.WriteLine($"  Original: {filePath}");
-                            foreach (var altPath in alternativeNames)
-                            {
-                                Console.WriteLine($"  Tried: {altPath}");
-                            }
-                        }
+                        Console.WriteLine($"Could not load binary file: {filePath}");
                     }
                 }
                 buffer.Uri = uri;
