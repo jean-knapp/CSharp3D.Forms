@@ -123,6 +123,9 @@
     <Compile Include="Lights\PointLight.cs">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="Meshes\CubemapMesh.cs">
+      <SubType>Component</SubType>
+    </Compile>
     <Compile Include="Meshes\CuboidMesh.cs">
       <SubType>Component</SubType>
     </Compile>

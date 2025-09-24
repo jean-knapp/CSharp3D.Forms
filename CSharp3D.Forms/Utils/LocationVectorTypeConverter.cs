@@ -16,7 +16,7 @@ namespace CSharp3D.Forms.Utils
         {
             if (value is string strValue)
             {
-                var parts = strValue.Split(',');
+                var parts = strValue.Split(';');
                 if (parts.Length == 3)
                 {
                     if (float.TryParse(parts[0], out float x) &&
@@ -39,7 +39,7 @@ namespace CSharp3D.Forms.Utils
         {
             if (destinationType == typeof(string) && value is LocationVector vector)
             {
-                return $"{vector.X}, {vector.Y}, {vector.Z}";
+                return $"{vector.X}; {vector.Y}; {vector.Z}";
             }
             return base.ConvertTo(context, culture, value, destinationType);
         }

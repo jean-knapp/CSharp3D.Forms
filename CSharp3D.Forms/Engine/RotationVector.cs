@@ -2,13 +2,14 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.Serialization;
 using System.Text;
 using System.Threading.Tasks;
 
 namespace CSharp3D.Forms.Engine
 {
     [Serializable]
-    public class RotationVector
+    public class RotationVector : ISerializable
     {
         public float Roll; // X
         public float Pitch; // Y
@@ -20,6 +21,22 @@ namespace CSharp3D.Forms.Engine
             Pitch = pitch;
             Yaw = yaw;
             Roll = roll;
+        }
+
+        // Serialization constructor
+        protected RotationVector(SerializationInfo info, StreamingContext context)
+        {
+            Roll = info.GetSingle("Roll");
+            Pitch = info.GetSingle("Pitch");
+            Yaw = info.GetSingle("Yaw");
+        }
+
+        // ISerializable implementation
+        public void GetObjectData(SerializationInfo info, StreamingContext context)
+        {
+            info.AddValue("Roll", Roll);
+            info.AddValue("Pitch", Pitch);
+            info.AddValue("Yaw", Yaw);
         }
 
         internal Vector3 ToVector3()

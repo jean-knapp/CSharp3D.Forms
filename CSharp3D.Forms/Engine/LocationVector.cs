@@ -1,10 +1,11 @@
 ﻿using OpenTK;
 using System;
+using System.Runtime.Serialization;
 
 namespace CSharp3D.Forms.Engine
 {
     [Serializable]
-    public class LocationVector
+    public class LocationVector : ISerializable
     {
         public float X;
         public float Y;
@@ -16,6 +17,22 @@ namespace CSharp3D.Forms.Engine
             X = x;
             Y = y;
             Z = z;
+        }
+
+        // Serialization constructor
+        protected LocationVector(SerializationInfo info, StreamingContext context)
+        {
+            X = info.GetSingle("X");
+            Y = info.GetSingle("Y");
+            Z = info.GetSingle("Z");
+        }
+
+        // ISerializable implementation
+        public void GetObjectData(SerializationInfo info, StreamingContext context)
+        {
+            info.AddValue("X", X);
+            info.AddValue("Y", Y);
+            info.AddValue("Z", Z);
         }
 
         internal Vector3 ToVector3()

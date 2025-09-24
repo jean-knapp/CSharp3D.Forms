@@ -37,9 +37,17 @@
             this.gltfMesh1 = new CSharp3D.Forms.Meshes.GLTFMesh();
             this.material1 = new CSharp3D.Forms.Engine.Material();
             this.pointLight1 = new CSharp3D.Forms.Lights.PointLight();
+            this.textureUp = new CSharp3D.Forms.Engine.Texture();
+            this.textureDn = new CSharp3D.Forms.Engine.Texture();
+            this.textureLf = new CSharp3D.Forms.Engine.Texture();
+            this.textureRt = new CSharp3D.Forms.Engine.Texture();
+            this.textureFt = new CSharp3D.Forms.Engine.Texture();
+            this.textureBk = new CSharp3D.Forms.Engine.Texture();
+            this.cubemapMesh1 = new CSharp3D.Forms.Meshes.CubemapMesh();
             ((System.ComponentModel.ISupportInitialize)(this.gridMesh1)).BeginInit();
             ((System.ComponentModel.ISupportInitialize)(this.gltfMesh1)).BeginInit();
             ((System.ComponentModel.ISupportInitialize)(this.pointLight1)).BeginInit();
+            ((System.ComponentModel.ISupportInitialize)(this.cubemapMesh1)).BeginInit();
             this.SuspendLayout();
             // 
             // rendererControl1
@@ -59,7 +67,7 @@
             // 
             this.orbitalCamera1.ClampVertically = false;
             this.orbitalCamera1.Distance = 4F;
-            this.orbitalCamera1.FarPlane = 1000F;
+            this.orbitalCamera1.FarPlane = 2048F;
             this.orbitalCamera1.FOV = 90F;
             this.orbitalCamera1.NearPlane = 0.1F;
             this.orbitalCamera1.Rotation = ((CSharp3D.Forms.Engine.RotationVector)(resources.GetObject("orbitalCamera1.Rotation")));
@@ -124,6 +132,40 @@
             this.pointLight1.Quadratic = 1F;
             this.pointLight1.Scene = this.scene1;
             // 
+            // textureUp
+            // 
+            this.textureUp.Bitmap = ((System.Drawing.Bitmap)(resources.GetObject("textureUp.Bitmap")));
+            // 
+            // textureDn
+            // 
+            this.textureDn.Bitmap = ((System.Drawing.Bitmap)(resources.GetObject("textureDn.Bitmap")));
+            // 
+            // textureLf
+            // 
+            this.textureLf.Bitmap = ((System.Drawing.Bitmap)(resources.GetObject("textureLf.Bitmap")));
+            // 
+            // textureRt
+            // 
+            this.textureRt.Bitmap = ((System.Drawing.Bitmap)(resources.GetObject("textureRt.Bitmap")));
+            // 
+            // textureFt
+            // 
+            this.textureFt.Bitmap = ((System.Drawing.Bitmap)(resources.GetObject("textureFt.Bitmap")));
+            // 
+            // textureBk
+            // 
+            this.textureBk.Bitmap = ((System.Drawing.Bitmap)(resources.GetObject("textureBk.Bitmap")));
+            // 
+            // cubemapMesh1
+            // 
+            this.cubemapMesh1.Back = this.textureBk;
+            this.cubemapMesh1.Down = this.textureDn;
+            this.cubemapMesh1.Front = this.textureFt;
+            this.cubemapMesh1.Left = this.textureLf;
+            this.cubemapMesh1.Right = this.textureRt;
+            this.cubemapMesh1.Scene = this.scene1;
+            this.cubemapMesh1.Up = this.textureUp;
+            // 
             // Form1
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
@@ -135,6 +177,7 @@
             ((System.ComponentModel.ISupportInitialize)(this.gridMesh1)).EndInit();
             ((System.ComponentModel.ISupportInitialize)(this.gltfMesh1)).EndInit();
             ((System.ComponentModel.ISupportInitialize)(this.pointLight1)).EndInit();
+            ((System.ComponentModel.ISupportInitialize)(this.cubemapMesh1)).EndInit();
             this.ResumeLayout(false);
 
         }
@@ -149,5 +192,12 @@
         private CSharp3D.Forms.Meshes.GLTFMesh gltfMesh1;
         private CSharp3D.Forms.Engine.Material material1;
         private CSharp3D.Forms.Lights.PointLight pointLight1;
+        private CSharp3D.Forms.Engine.Texture textureBk;
+        private CSharp3D.Forms.Engine.Texture textureDn;
+        private CSharp3D.Forms.Engine.Texture textureFt;
+        private CSharp3D.Forms.Engine.Texture textureLf;
+        private CSharp3D.Forms.Engine.Texture textureRt;
+        private CSharp3D.Forms.Engine.Texture textureUp;
+        private CSharp3D.Forms.Meshes.CubemapMesh cubemapMesh1;
     }
 }

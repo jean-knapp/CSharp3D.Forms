@@ -17,7 +17,7 @@ namespace CSharp3D.Forms.Utils
         {
             if (value is string strValue)
             {
-                var parts = strValue.Split(',');
+                var parts = strValue.Split(';');
                 if (parts.Length == 3)
                 {
                     if (float.TryParse(parts[0], out float roll) &&
@@ -40,7 +40,7 @@ namespace CSharp3D.Forms.Utils
         {
             if (destinationType == typeof(string) && value is RotationVector vector)
             {
-                return $"{vector.Roll}, {vector.Pitch}, {vector.Yaw}";
+                return $"{vector.Roll}; {vector.Pitch}; {vector.Yaw}";
             }
             return base.ConvertTo(context, culture, value, destinationType);
         }
