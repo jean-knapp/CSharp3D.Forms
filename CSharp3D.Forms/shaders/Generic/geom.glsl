@@ -1,12 +1,14 @@
 ﻿#version 330 core
 
+#define MAX_LIGHTS 8  // Change this value to support more/fewer lights (must match C# MAX_LIGHTS)
+
 layout (triangles) in;
 layout (triangle_strip, max_vertices = 3) out;
 
 out vec2 fragTexCoord;     // Pass the texture coordinates to the fragment shader
 out vec3 fragNormal;       // Pass the normal vector to the fragment shader for lighting calculations
 out vec3 fragPosition;     // Pass the transformed vertex position to the fragment shader
-out vec3 fragLightPosition;
+out vec3 fragLightPosition[MAX_LIGHTS];
 out vec3 fragCameraPosition;
 
 in vec2 geomTexCoord[];	// The texture coordinates for the geometry
@@ -14,7 +16,7 @@ in vec3 geomNormal[]; 	// The normal vector for the geometry
 in vec3 geomPosition[]; 	// The transformed vertex position for the geometry
 in mat4 geomModel[];
 
-in vec3 geomLightPosition[];
+uniform vec3 uLightPosition[MAX_LIGHTS];   // Light positions as uniforms
 in vec3 geomCameraPosition[];
 
 uniform bool uUseNormalTexture;
@@ -55,12 +57,16 @@ void main()
 		if (uUseNormalTexture)
 		{
 			fragPosition = TBN * geomPosition[i];
-			fragLightPosition = TBN * geomLightPosition[i];
+			for (int j = 0; j < MAX_LIGHTS; j++) {
+				fragLightPosition[j] = TBN * uLightPosition[j];
+			}
 			fragCameraPosition = TBN * geomCameraPosition[i];
 		}
 		else {
 			fragPosition = geomPosition[i];
-			fragLightPosition = geomLightPosition[i];
+			for (int j = 0; j < MAX_LIGHTS; j++) {
+				fragLightPosition[j] = uLightPosition[j];
+			}
 			fragCameraPosition = geomCameraPosition[i];
 		}
 

@@ -117,11 +117,13 @@ namespace CSharp3D.Forms.Controls
 
             if (!this.DesignMode)
             {
+                // Make sure the renderer has a scene
                 if (Scene == null)
                 {
                     Scene = new Scene();
                 }
 
+                // Make sure the renderer has a camera.
                 if (Camera == null)
                 {
                     Camera = new OrbitalCamera(new RotationVector(0, 0, 0), 4);
@@ -252,17 +254,21 @@ namespace CSharp3D.Forms.Controls
             Matrix4 projection = Camera.GetProjectionMatrix(glControl.Width, glControl.Height);
             Matrix4 view = Camera.GetViewMatrix(this);
 
-            // Draw opaque meshes meshes
             List<Mesh> transparentMeshes = new List<Mesh>();
+
+            // Draw opaque meshes
             foreach (Mesh mesh in Scene.Meshes)
             {
+                // Check if mesh is transparent
                 if (mesh.Material != null && (mesh.Material.Translucent || mesh.Material.Additive || mesh.Material.Alpha < 1))
                 {
+                    // Draw it later if it's transparent
                     transparentMeshes.Add(mesh);
                     continue;
                 }
                 else
                 {
+                    // Draw it now if it's solid
                     mesh.DrawMesh(Context, Scene, projection, view);
                 }
             }
@@ -282,6 +288,10 @@ namespace CSharp3D.Forms.Controls
                 {
                     mesh.DrawMesh(Context, Scene, projection, view);
                 }
+            }
+            else
+            {
+                throw new NotImplementedException();
             }
 
             GL.DepthMask(true);

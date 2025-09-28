@@ -19,6 +19,7 @@ namespace CSharp3D.Forms.Meshes
     [ToolboxItem(false)]
     public abstract class Mesh : Component, ISupportInitialize
     {
+        private const int MAX_LIGHTS = 8; // Change this value to support more/fewer lights (must match shader MAX_LIGHTS)
         private bool _isInitialized;
 
         /// <summary>
@@ -301,6 +302,12 @@ namespace CSharp3D.Forms.Meshes
                     SetupMesh(context);
                 }
 
+                // Make sure the mesh has at least a basic material.
+                if (Material == null)
+                {
+                    Material = new Material();
+                }
+
                 Material.Use(context, scene);
 
                 int shaderProgram = Material.Shader.GetShaderId(context, scene);
@@ -330,21 +337,73 @@ namespace CSharp3D.Forms.Meshes
                 int lightColorLocation = GL.GetUniformLocation(shaderProgram, "uLightColor");
                 int ambientColorLocation = GL.GetUniformLocation(shaderProgram, "uAmbientColor");
                 int lightAttenuationLocation = GL.GetUniformLocation(shaderProgram, "uLightAttenuation");
-                if (scene.Lights.Count > 0)
+                // Prepare arrays for MAX_LIGHTS light sources
+                float[] lightPositions = new float[MAX_LIGHTS * 3]; // MAX_LIGHTS * 3 components
+                float[] lightColors = new float[MAX_LIGHTS * 4];    // MAX_LIGHTS * 4 components
+                float[] ambientColors = new float[MAX_LIGHTS * 4];  // MAX_LIGHTS * 4 components
+                float[] lightAttenuations = new float[MAX_LIGHTS * 3]; // MAX_LIGHTS * 3 components
+
+                // Set up all lights
+                for (int i = 0; i < MAX_LIGHTS; i++)
                 {
-                    PointLight pointLight = scene.Lights[0];
-                    GL.Uniform3(lightPositionLocation, VectorOrientation.ToGL(pointLight.Location));
-                    GL.Uniform4(lightColorLocation, Material.Unlit ? new Vector4(1, 1, 1, 0) : new Vector4(pointLight.Color.R / 255f, pointLight.Color.G / 255f, pointLight.Color.B / 255f, pointLight.Intensity));
-                    GL.Uniform4(ambientColorLocation, Material.Unlit ? new Vector4(1, 1, 1, 1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity));
-                    GL.Uniform3(lightAttenuationLocation, new Vector3(pointLight.Quadratic, pointLight.Linear, pointLight.Constant));
+                    int posIndex = i * 3;
+                    int colorIndex = i * 4;
+                    
+                    if (i < scene.Lights.Count)
+                    {
+                        // Light exists - use its properties
+                        PointLight pointLight = scene.Lights[i];
+                        Vector3 lightPos = VectorOrientation.ToGL(pointLight.Location);
+                        lightPositions[posIndex] = lightPos.X; 
+                        lightPositions[posIndex + 1] = lightPos.Y; 
+                        lightPositions[posIndex + 2] = lightPos.Z;
+                        
+                        Vector4 lightCol = Material.Unlit ? new Vector4(1, 1, 1, 0) : new Vector4(pointLight.Color.R / 255f, pointLight.Color.G / 255f, pointLight.Color.B / 255f, pointLight.Intensity);
+                        lightColors[colorIndex] = lightCol.X; 
+                        lightColors[colorIndex + 1] = lightCol.Y; 
+                        lightColors[colorIndex + 2] = lightCol.Z; 
+                        lightColors[colorIndex + 3] = lightCol.W;
+                        
+                        Vector4 ambientCol = Material.Unlit ? new Vector4(1, 1, 1, 1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity);
+                        ambientColors[colorIndex] = ambientCol.X; 
+                        ambientColors[colorIndex + 1] = ambientCol.Y; 
+                        ambientColors[colorIndex + 2] = ambientCol.Z; 
+                        ambientColors[colorIndex + 3] = ambientCol.W;
+                        
+                        Vector3 lightAtt = new Vector3(pointLight.Quadratic, pointLight.Linear, pointLight.Constant);
+                        lightAttenuations[posIndex] = lightAtt.X; 
+                        lightAttenuations[posIndex + 1] = lightAtt.Y; 
+                        lightAttenuations[posIndex + 2] = lightAtt.Z;
+                    }
+                    else
+                    {
+                        // Light doesn't exist - set to "off"
+                        lightPositions[posIndex] = 0.0f; 
+                        lightPositions[posIndex + 1] = 0.0f; 
+                        lightPositions[posIndex + 2] = 0.0f;
+                        
+                        lightColors[colorIndex] = 1.0f; 
+                        lightColors[colorIndex + 1] = 1.0f; 
+                        lightColors[colorIndex + 2] = 1.0f; 
+                        lightColors[colorIndex + 3] = 0.0f; // Intensity = 0 means off
+                        
+                        Vector4 ambientCol = Material.Unlit ? new Vector4(1, 1, 1, 1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity);
+                        ambientColors[colorIndex] = ambientCol.X; 
+                        ambientColors[colorIndex + 1] = ambientCol.Y; 
+                        ambientColors[colorIndex + 2] = ambientCol.Z; 
+                        ambientColors[colorIndex + 3] = ambientCol.W;
+                        
+                        lightAttenuations[posIndex] = 1.0f; 
+                        lightAttenuations[posIndex + 1] = 0.0f; 
+                        lightAttenuations[posIndex + 2] = 0.0f;
+                    }
                 }
-                else
-                {
-                    GL.Uniform3(lightPositionLocation, Vector3.Zero);
-                    GL.Uniform4(lightColorLocation, new Vector4(1.0f, 1.0f, 1.0f, 0.0f));
-                    GL.Uniform4(ambientColorLocation, Material.Unlit ? new Vector4(1, 1, 1, 1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity));
-                    GL.Uniform3(lightAttenuationLocation, new Vector3(1.0f, 0.0f, 0.0f));
-                }
+
+                // Send all uniform data
+                GL.Uniform3(lightPositionLocation, MAX_LIGHTS, lightPositions);
+                GL.Uniform4(lightColorLocation, MAX_LIGHTS, lightColors);
+                GL.Uniform4(ambientColorLocation, MAX_LIGHTS, ambientColors);
+                GL.Uniform3(lightAttenuationLocation, MAX_LIGHTS, lightAttenuations);
 
                 int cameraPositionLocation = GL.GetUniformLocation(shaderProgram, "uCameraPosition");
                 var cameraLocation = Camera.GetLocation(view);
