@@ -122,6 +122,8 @@ namespace CSharp3D.Forms.Cameras
 
         public override void MouseUp(RendererControl rendererControl, MouseButtons button)
         {
+            // Center the mouse before restoring the cursor
+            Cursor.Position = rendererControl.GetCenterPointInScreen();
             Cursor.Current = Cursors.Default;
             Rotation = GetRotation(rendererControl);
 

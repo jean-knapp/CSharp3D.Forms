@@ -379,8 +379,12 @@ namespace CSharp3D.Forms.Controls
         /// <returns></returns>
         internal Point GetCenterPointInScreen()
         {
-            var center = glControl.PointToScreen(Location);
-            center = new Point(center.X + Width / 2, center.Y + Height / 2);
+            var topleft = this.PointToScreen(new System.Drawing.Point(0, 0));
+            var bottomright = this.PointToScreen(new System.Drawing.Point(this.Width, this.Height));
+            var center = new Point((topleft.X + bottomright.X) / 2, (topleft.Y + bottomright.Y) / 2);
+
+            //var center = glControl.PointToScreen(Location);
+            //center = new Point(center.X + Width / 2, center.Y + Height / 2);
             return center;
         }
 
