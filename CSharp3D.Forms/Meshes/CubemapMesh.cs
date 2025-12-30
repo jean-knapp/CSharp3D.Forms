@@ -115,45 +115,45 @@ namespace CSharp3D.Forms.Meshes
 
             frontMesh.Vertices = new CSharp3D.Forms.Engine.Vertex[]
             {
-                new CSharp3D.Forms.Engine.Vertex(1023, -1024, 1024, 1, 0),
-                new CSharp3D.Forms.Engine.Vertex(1023, 1024, 1024, 0, 0),
-                new CSharp3D.Forms.Engine.Vertex(1023, 1024, -1024, 0, 1),
-                new CSharp3D.Forms.Engine.Vertex(1023, -1024, -1024, 1, 1),
+                new CSharp3D.Forms.Engine.Vertex(1020, -1024, 1024, 1, 0),
+                new CSharp3D.Forms.Engine.Vertex(1020, 1024, 1024, 0, 0),
+                new CSharp3D.Forms.Engine.Vertex(1020, 1024, -1024, 0, 1),
+                new CSharp3D.Forms.Engine.Vertex(1020, -1024, -1024, 1, 1),
             };
             backMesh.Vertices = new CSharp3D.Forms.Engine.Vertex[]
             {
-                new CSharp3D.Forms.Engine.Vertex(-1023, -1024, -1024, 0, 1),
-                new CSharp3D.Forms.Engine.Vertex(-1023, 1024, -1024, 1, 1),
-                new CSharp3D.Forms.Engine.Vertex(-1023, 1024, 1024, 1, 0),
-                new CSharp3D.Forms.Engine.Vertex(-1023, -1024, 1024, 0, 0),
-            };
-            leftMesh.Vertices = new CSharp3D.Forms.Engine.Vertex[]
-            {
-                new CSharp3D.Forms.Engine.Vertex(-1024, 1023, -1024, 0, 1),
-                new CSharp3D.Forms.Engine.Vertex(1024, 1023, -1024, 1, 1),
-                new CSharp3D.Forms.Engine.Vertex(1024, 1023, 1024, 1, 0),
-                new CSharp3D.Forms.Engine.Vertex(-1024, 1023, 1024, 0, 0),
+                new CSharp3D.Forms.Engine.Vertex(-1020, -1024, -1024, 0, 1),
+                new CSharp3D.Forms.Engine.Vertex(-1020, 1024, -1024, 1, 1),
+                new CSharp3D.Forms.Engine.Vertex(-1020, 1024, 1024, 1, 0),
+                new CSharp3D.Forms.Engine.Vertex(-1020, -1024, 1024, 0, 0),
             };
             rightMesh.Vertices = new CSharp3D.Forms.Engine.Vertex[]
             {
-                new CSharp3D.Forms.Engine.Vertex(-1024, -1023, 1024, 1, 0),
-                new CSharp3D.Forms.Engine.Vertex(1024, -1023, 1024, 0, 0),
-                new CSharp3D.Forms.Engine.Vertex(1024, -1023, -1024, 0, 1),
-                new CSharp3D.Forms.Engine.Vertex(-1024, -1023, -1024, 1, 1),
+                new CSharp3D.Forms.Engine.Vertex(-1024, 1020, -1024, 0, 1),
+                new CSharp3D.Forms.Engine.Vertex(1024, 1020, -1024, 1, 1),
+                new CSharp3D.Forms.Engine.Vertex(1024, 1020, 1024, 1, 0),
+                new CSharp3D.Forms.Engine.Vertex(-1024, 1020, 1024, 0, 0),
+            };
+            leftMesh.Vertices = new CSharp3D.Forms.Engine.Vertex[]
+            {
+                new CSharp3D.Forms.Engine.Vertex(-1024, -1020, 1024, 1, 0),
+                new CSharp3D.Forms.Engine.Vertex(1024, -1020, 1024, 0, 0),
+                new CSharp3D.Forms.Engine.Vertex(1024, -1020, -1024, 0, 1),
+                new CSharp3D.Forms.Engine.Vertex(-1024, -1020, -1024, 1, 1),
             };
             upMesh.Vertices = new CSharp3D.Forms.Engine.Vertex[]
             {
-                new CSharp3D.Forms.Engine.Vertex(1024, 1024, 1023, 0, 1),
-                new CSharp3D.Forms.Engine.Vertex(1024, -1024, 1023, 1, 1),
-                new CSharp3D.Forms.Engine.Vertex(-1024, -1024, 1023, 1, 0),
-                new CSharp3D.Forms.Engine.Vertex(-1024, 1024, 1023, 0, 0),
+                new CSharp3D.Forms.Engine.Vertex(1024, 1024, 1020, 0, 1),
+                new CSharp3D.Forms.Engine.Vertex(1024, -1024, 1020, 1, 1),
+                new CSharp3D.Forms.Engine.Vertex(-1024, -1024, 1020, 1, 0),
+                new CSharp3D.Forms.Engine.Vertex(-1024, 1024, 1020, 0, 0),
             };
             downMesh.Vertices = new CSharp3D.Forms.Engine.Vertex[]
             {
-                new CSharp3D.Forms.Engine.Vertex(-1024, 1024, -1023, 0, 0),
-                new CSharp3D.Forms.Engine.Vertex(-1024, -1024, -1023, 1, 0),
-                new CSharp3D.Forms.Engine.Vertex(1024, -1024, -1023, 1, 1),
-                new CSharp3D.Forms.Engine.Vertex(1024, 1024, -1023, 0, 1),
+                new CSharp3D.Forms.Engine.Vertex(-1024, 1024, -1020, 0, 1),
+                new CSharp3D.Forms.Engine.Vertex(-1024, -1024, -1020, 1, 1),
+                new CSharp3D.Forms.Engine.Vertex(1024, -1024, -1020, 1, 0),
+                new CSharp3D.Forms.Engine.Vertex(1024, 1024, -1020, 0, 0),
             };
         }
 
