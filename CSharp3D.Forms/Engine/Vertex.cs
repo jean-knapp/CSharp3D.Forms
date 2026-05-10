@@ -42,6 +42,13 @@ namespace CSharp3D.Forms.Engine
         /// </summary>
         public Vector2 TextureCoords => new Vector2(U, V);
 
+        public Vertex(float x, float y, float z)
+        {
+            X = x;
+            Y = y;
+            Z = z;
+        }
+
         public Vertex(float x, float y, float z, float u, float v)
         {
             X = x;

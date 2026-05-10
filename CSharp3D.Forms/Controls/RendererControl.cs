@@ -291,7 +291,12 @@ namespace CSharp3D.Forms.Controls
             }
             else
             {
-                throw new NotImplementedException();
+                // TODO implement sorting
+                var sortedTransparentMeshes = transparentMeshes;
+                foreach (Mesh mesh in sortedTransparentMeshes)
+                {
+                    mesh.DrawMesh(Context, Scene, projection, view);
+                }
             }
 
             GL.DepthMask(true);

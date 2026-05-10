@@ -14,7 +14,7 @@ namespace CSharp3D.Forms.Meshes
         /// The vertices of the polygon.
         /// </summary>
         [Browsable(false)]
-        public Vector3[] Vertices { get; set; } = { };
+        public Vertex[] Vertices { get; set; } = { };
 
         /// <summary>
         /// The U map of the material
