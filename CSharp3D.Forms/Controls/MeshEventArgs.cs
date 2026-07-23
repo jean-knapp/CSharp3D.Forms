@@ -9,7 +9,7 @@ namespace CSharp3D.Forms.Controls
 
         public MeshEventArgs(Mesh mesh) : base()
         {
-
+            Mesh = mesh;
         }
     }
 }

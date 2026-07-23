@@ -82,6 +82,42 @@ namespace CSharp3D.Forms.Meshes
         [Description("Whether the mesh can be picked by a mouse click.")]
         public bool Clickable { get; set; } = false;
 
+        /// <summary>
+        /// How the mesh interacts with the depth buffer. <see cref="MeshDepthMode.Normal"/> is the
+        /// ordinary depth-tested draw. <see cref="MeshDepthMode.Overlay"/> ignores the depth test
+        /// entirely, so the mesh draws in front of everything already rendered — what an editor's
+        /// tool guides (selection boxes, handles) need to never disappear inside geometry.
+        /// <see cref="MeshDepthMode.OccludedOnly"/> draws only where the mesh LOSES the depth test —
+        /// the hidden-line half of a "solid where visible, dashed where hidden" selection overlay.
+        /// Overlay and OccludedOnly never write depth (Overlay skips the test that gates writes;
+        /// OccludedOnly masks writes off), so neither can corrupt the scene's own occlusion.
+        /// </summary>
+        [Category("Mesh")]
+        [Description("How the mesh interacts with the depth buffer when drawn.")]
+        public MeshDepthMode DepthMode { get; set; } = MeshDepthMode.Normal;
+
+        /// <summary>
+        /// Which views draw this mesh, judged by each view's <see cref="MeshDrawMode"/>
+        /// (see <see cref="MeshViewFilter"/>). Default: every view.
+        /// </summary>
+        public MeshViewFilter ViewFilter { get; set; } = MeshViewFilter.All;
+
+        /// <summary> Whether a view with the given draw mode should draw this mesh. </summary>
+        public bool IsVisibleIn(MeshDrawMode viewDrawMode)
+        {
+            switch (ViewFilter)
+            {
+                case MeshViewFilter.WireframeViewsOnly:
+                    return viewDrawMode == MeshDrawMode.Wireframe;
+
+                case MeshViewFilter.ExceptWireframeViews:
+                    return viewDrawMode != MeshDrawMode.Wireframe;
+
+                default:
+                    return true;
+            }
+        }
+
         public Mesh()
         {
             Location = new LocationVector(0, 0, 0);
@@ -118,6 +154,11 @@ namespace CSharp3D.Forms.Meshes
         {
             try
             {
+                // The context is going away; it can no longer owe an upload, and its buffers are
+                // about to be deleted so nothing is uploaded there any more.
+                _staleVertexContexts.Remove(context);
+                _uploadedIndexCounts.Remove(context);
+
                 if (vao.ContainsKey(context) && vao[context] != 0)
                 {
                     GL.DeleteVertexArray(vao[context]);
@@ -232,10 +273,139 @@ namespace CSharp3D.Forms.Meshes
         }
 
         /// <summary>
-        /// Setup the mesh.
+        /// The contexts whose vertex buffers are stale. A mesh keeps one VBO per GL context (see
+        /// <see cref="vbo"/>), so "needs updating" is per-context, not per-mesh: with several
+        /// views on one scene — a quad viewport, say — a single shared flag would be consumed by
+        /// whichever view painted first, leaving the rest showing stale geometry.
+        /// </summary>
+        private readonly HashSet<object> _staleVertexContexts = new HashSet<object>();
+
+        /// <summary>
+        /// Set to true after mutating the vertex data of an already-loaded mesh (e.g. CPU skinning,
+        /// or an editor drag) to have every context re-upload its buffer on the next draw, instead
+        /// of reusing the cached one. Reads true while any context is still stale.
+        ///
+        /// Contexts that have not loaded the mesh yet are not marked: their first draw runs
+        /// <see cref="SetupMesh"/>, which uploads the current data anyway.
+        /// </summary>
+        public bool NeedsVertexUpdate
+        {
+            get { return _staleVertexContexts.Count > 0; }
+            set
+            {
+                _staleVertexContexts.Clear();
+
+                if (!value)
+                    return;
+
+                foreach (object context in vbo.Keys)
+                    _staleVertexContexts.Add(context);
+            }
+        }
+
+        /// <summary>
+        /// Whether <paramref name="context"/> still has to re-upload this mesh's vertices.
+        /// </summary>
+        public bool IsVertexUpdatePending(object context)
+        {
+            return _staleVertexContexts.Contains(context);
+        }
+
+        /// <summary>
+        /// Records that <paramref name="context"/>'s vertex buffer now matches the mesh data.
+        /// <see cref="DrawMesh"/> calls this after re-uploading; a mesh that uploads its buffers
+        /// itself should call it too. Only this context is affected — the others still owe theirs.
+        /// </summary>
+        public void MarkVertexBufferUpdated(object context)
+        {
+            _staleVertexContexts.Remove(context);
+        }
+
+        /// <summary>
+        /// How many indices each context's element buffer currently holds, so a mesh whose
+        /// topology grows or shrinks re-uploads it.
+        /// </summary>
+        private readonly Dictionary<object, int> _uploadedIndexCounts = new Dictionary<object, int>();
+
+        /// <summary>
+        /// Whether <paramref name="context"/>'s index buffer no longer matches the mesh.
+        ///
+        /// Most meshes keep a fixed topology and only move their vertices (CPU skinning, an editor
+        /// drag), so the index buffer is uploaded once and left alone. A mesh whose vertex *count*
+        /// changes — a grid that regenerates for the visible region, say — invalidates it: the draw
+        /// call asks for as many indices as the mesh currently has, and a stale, shorter buffer
+        /// silently drops the tail of the geometry.
+        ///
+        /// Note this compares counts, not contents: a mesh that reorders its indices without
+        /// changing how many there are must be rebuilt rather than updated.
+        /// </summary>
+        public bool IsIndexUploadPending(object context)
+        {
+            int uploaded;
+            if (!_uploadedIndexCounts.TryGetValue(context, out uploaded))
+                return true;
+
+            return uploaded != GetIndexArray().Length;
+        }
+
+        /// <summary> Records that <paramref name="context"/>'s index buffer matches the mesh. </summary>
+        public void MarkIndexBufferUploaded(object context)
+        {
+            _uploadedIndexCounts[context] = GetIndexArray().Length;
+        }
+
+        /// <summary>
+        /// Re-uploads the vertex data into the existing VBO for a context. Must run on the GL
+        /// thread (DrawMesh does). Uses the standard 8-float layout; meshes with a custom layout
+        /// override this alongside <see cref="SetupMesh"/>.
+        /// </summary>
+        protected virtual void UpdateVertexBuffer(object context)
+        {
+            if (!vbo.ContainsKey(context))
+                return;
+
+            float[] vertices = GetGLVertexArray();
+
+            GL.BindBuffer(BufferTarget.ArrayBuffer, vbo[context]);
+            GL.BufferData(BufferTarget.ArrayBuffer, vertices.Length * sizeof(float), vertices, BufferUsageHint.DynamicDraw);
+            GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
+
+            UpdateIndexBuffer(context);
+
+            ComputeBoundingBox(this);
+        }
+
+        /// <summary>
+        /// Re-uploads the element buffer when the mesh's topology no longer matches what this
+        /// context holds. Skipped for the usual fixed-topology mesh, so per-frame vertex updates
+        /// stay cheap.
+        /// </summary>
+        private void UpdateIndexBuffer(object context)
+        {
+            if (!ebo.ContainsKey(context) || !vao.ContainsKey(context))
+                return;
+
+            if (!IsIndexUploadPending(context))
+                return;
+
+            uint[] indices = GetIndexArray();
+
+            // The element buffer binding belongs to the vertex array object, so bind the VAO
+            // around this — binding it loose would not attach it to the mesh's VAO.
+            GL.BindVertexArray(vao[context]);
+            GL.BindBuffer(BufferTarget.ElementArrayBuffer, ebo[context]);
+            GL.BufferData(BufferTarget.ElementArrayBuffer, indices.Length * sizeof(uint), indices, BufferUsageHint.DynamicDraw);
+            GL.BindVertexArray(0);
+
+            MarkIndexBufferUploaded(context);
+        }
+
+        /// <summary>
+        /// Setup the mesh. Virtual so meshes with a custom vertex layout or dynamic
+        /// buffers (e.g. ParticleBatchMesh) can replace the fixed 8-float layout.
         /// </summary>
         /// <param name="context"></param>
-        public void SetupMesh(object context)
+        public virtual void SetupMesh(object context)
         {
             // Cube vertex data with positions and texture coordinates
             float[] vertices = GetGLVertexArray();
@@ -274,6 +444,9 @@ namespace CSharp3D.Forms.Meshes
 
             GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
             GL.BindVertexArray(0);
+
+            // Remember the topology this context now holds, so a later change re-uploads it.
+            MarkIndexBufferUploaded(context);
         }
 
         /// <summary>
@@ -293,13 +466,22 @@ namespace CSharp3D.Forms.Meshes
         /// <param name="scene"> The scene. </param>
         /// <param name="projection"> The projection matrix. </param>
         /// <param name="view"> The view matrix. </param>
-        public void DrawMesh(object context, Scene scene, Matrix4 projection, Matrix4 view)
+        public virtual void DrawMesh(object context, Scene scene, Matrix4 projection, Matrix4 view,
+            MeshDrawMode drawMode = MeshDrawMode.Textured)
         {
             try
             {
                 if (!IsVertexDataLoaded(context))
                 {
                     SetupMesh(context);
+                }
+                else if (IsVertexUpdatePending(context))
+                {
+                    // Re-upload vertex data in place (e.g. CPU skinning) without recreating the
+                    // buffers. Runs on the GL thread since DrawMesh does. Only this context is
+                    // marked clean — the other views still owe themselves an upload.
+                    UpdateVertexBuffer(context);
+                    MarkVertexBufferUpdated(context);
                 }
 
                 // Make sure the mesh has at least a basic material.
@@ -312,8 +494,13 @@ namespace CSharp3D.Forms.Meshes
 
                 int shaderProgram = Material.Shader.GetShaderId(context, scene);
 
+                // Only the textured mode samples the albedo; solid and wireframe fall back to the
+                // material's flat colour, which is what makes them readable.
+                bool useAlbedo = drawMode == MeshDrawMode.Textured
+                    && Material.Albedo != null && Material.Albedo.Bitmap != null;
+
                 int useDiffuseTextureLocation = GL.GetUniformLocation(shaderProgram, "uUseDiffuseTexture");
-                GL.Uniform1(useDiffuseTextureLocation, Material.Albedo != null && Material.Albedo.Bitmap != null ? 1 : 0);
+                GL.Uniform1(useDiffuseTextureLocation, useAlbedo ? 1 : 0);
 
                 int useNormalTextureLocation = GL.GetUniformLocation(shaderProgram, "uUseNormalTexture");
                 GL.Uniform1(useNormalTextureLocation, Material.Normal != null && Material.Normal.Bitmap != null ? 1 : 0);
@@ -421,9 +608,36 @@ namespace CSharp3D.Forms.Meshes
                 int modelLoc = GL.GetUniformLocation(shaderProgram, "uModel");
                 GL.UniformMatrix4(modelLoc, false, ref model);
 
+                // Depth-mode override for tool overlays. Global GL state, so whatever was in effect
+                // is captured and restored right after the draw — the next mesh shares this state
+                // machine, and the renderer's translucent pass runs with the depth mask off.
+                bool priorDepthMask = false;
+                if (DepthMode == MeshDepthMode.Overlay)
+                {
+                    GL.Disable(EnableCap.DepthTest);
+                }
+                else if (DepthMode == MeshDepthMode.OccludedOnly)
+                {
+                    // Draw only where the mesh is BEHIND what is already there; keep depth writes
+                    // off so the pass cannot punch holes into the scene's occlusion.
+                    GL.GetBoolean(GetPName.DepthWritemask, out priorDepthMask);
+                    GL.DepthFunc(DepthFunction.Greater);
+                    GL.DepthMask(false);
+                }
+
                 GL.BindVertexArray(vao[context]);
                 GL.DrawElements(PrimitiveType, GetIndexArray().Length, DrawElementsType.UnsignedInt, 0);
                 GL.BindVertexArray(0);
+
+                if (DepthMode == MeshDepthMode.Overlay)
+                {
+                    GL.Enable(EnableCap.DepthTest);
+                }
+                else if (DepthMode == MeshDepthMode.OccludedOnly)
+                {
+                    GL.DepthFunc(DepthFunction.Less);
+                    GL.DepthMask(priorDepthMask);
+                }
             } catch (AccessViolationException e)
             {
 

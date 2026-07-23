@@ -96,7 +96,7 @@ namespace CSharp3D.Forms.Cameras
             var mouseDelta = GetMouseDelta();
             RotationVector rotation = Rotation;
 
-            if (IsMiddleMouseButtonDown || MouseLook)
+            if (IsMiddleMouseButtonDown || IsRightMouseButtonDown || MouseLook)
             {
                 rotation = rotation - new RotationVector(0, 2 * mouseDelta.Y * FOV / rendererControl.Height, 2 * mouseDelta.X * FOV / rendererControl.Width);
 
@@ -128,7 +128,8 @@ namespace CSharp3D.Forms.Cameras
 
         public override void MouseDown(RendererControl rendererControl, MouseButtons button)
         {
-            if (button == MouseButtons.Middle && !MouseLook)
+            // Hold the middle OR right mouse button to look around (Hammer uses the right button).
+            if ((button == MouseButtons.Middle || button == MouseButtons.Right) && !MouseLook)
             {
                 // Get the absolute position of the center of glControl
                 Cursor.Position = rendererControl.GetCenterPointInScreen();
@@ -140,30 +141,45 @@ namespace CSharp3D.Forms.Cameras
 
         public override void MouseUp(RendererControl rendererControl, MouseButtons button)
         {
-            if (button == MouseButtons.Middle && !MouseLook)
+            if ((button == MouseButtons.Middle || button == MouseButtons.Right) && !MouseLook)
             {
                 Cursor.Current = Cursors.Default;
                 Rotation = GetRotation(rendererControl);
-            } 
+            }
 
             base.MouseUp(rendererControl, button);
         }
 
+        /// <summary>
+        /// Dollies the camera forward/back along its current look direction — Hammer's 3D-view wheel
+        /// behavior. Unlike WASD movement (<see cref="Move"/>), this needs no button held: the wheel
+        /// only fires while the cursor is over this view, so that is gate enough on its own.
+        /// </summary>
         public override void MouseWheel(RendererControl rendererControl, MouseEventArgs e)
         {
             base.MouseWheel(rendererControl, e);
+
+            RotationVector rotation = GetRotation(rendererControl);
+            double yaw = -rotation.Yaw * Math.PI / 180f;
+            double pitch = rotation.Pitch * Math.PI / 180f;
+
+            float distance = (e.Delta / 120f) * MoveSpeed;
+
+            Location = new LocationVector(
+                Location.X + (float)(distance * Math.Cos(yaw) * Math.Cos(pitch)),
+                Location.Y + (float)(distance * Math.Sin(yaw) * Math.Cos(pitch)),
+                Location.Z + (float)(distance * Math.Sin(pitch)));
         }
 
         /// <summary>
-        /// Updates the camera each frame.
-        /// This is where you poll keyboard & mouse, or pass them in from outside.
+        /// Updates the camera each frame. This is where you poll keyboard & mouse, or pass them in
+        /// from outside. Movement needs no mouse button held (only look-around, in
+        /// <see cref="GetRotation"/>, does) — WASD works as soon as this key state reaches the
+        /// camera, so a host that only forwards keys while its view has focus (e.g. on mouse-enter)
+        /// gets "hover to fly" for free.
         /// </summary>
-        /// 
         public void Move(RendererControl control, double deltaTime, bool wDown, bool aDown, bool sDown, bool dDown, bool spaceDown, bool shiftDown)
         {
-            if (!IsMiddleMouseButtonDown && !MouseLook)
-                return;
-
             float speed = MoveSpeed;
 
             double distance = speed * deltaTime;
