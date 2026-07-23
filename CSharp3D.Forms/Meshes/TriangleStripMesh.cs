@@ -10,9 +10,10 @@ namespace CSharp3D.Forms.Meshes
     [ToolboxItem(false)]
     public class TriangleStripMesh : Mesh
     {
-        public Vector3[] Position { get; set; } = { };
-        public Vector3[] Normal { get; set; } = { };
-        public Vector2[] UV { get; set; } = { };
+        /// <summary>
+        /// The vertices of the triangle strip.
+        /// </summary>
+        public Vertex[] Vertices { get; set; } = { };
 
         public TriangleStripMesh() : base()
         {
@@ -33,19 +34,19 @@ namespace CSharp3D.Forms.Meshes
             // Cuboid vertex data with positions and texture coordinates
 
             // Positions (-y, z, -x) , Normals (nx, ny, nz), Texture Coords (u, v)
-            float[] result = new float[Position.Length * 8];
+            float[] result = new float[Vertices.Length * 8];
 
             // Vertex data should be stored as -y, z, -x, u, v
-            for (int i = 0; i < Position.Length; i++)
+            for (int i = 0; i < Vertices.Length; i++)
             {
-                result[i * 8] = Position[i].X;
-                result[i * 8 + 1] = Position[i].Z;
-                result[i * 8 + 2] = Position[i].Y;
-                result[i * 8 + 3] = Normal[i].X;
-                result[i * 8 + 4] = Normal[i].Y;
-                result[i * 8 + 5] = Normal[i].Z;
-                result[i * 8 + 6] = UV[i].X;
-                result[i * 8 + 7] = UV[i].Y;
+                result[i * 8] = Vertices[i].X;
+                result[i * 8 + 1] = Vertices[i].Z;
+                result[i * 8 + 2] = Vertices[i].Y;
+                //result[i * 8 + 3] = Normal[i].X;
+                //result[i * 8 + 4] = Normal[i].Y;
+                //result[i * 8 + 5] = Normal[i].Z;
+                result[i * 8 + 6] = Vertices[i].U;
+                result[i * 8 + 7] = Vertices[i].V;
             }
 
             bool normalize = true;
@@ -100,8 +101,8 @@ namespace CSharp3D.Forms.Meshes
         public override uint[] GetIndexArray()
         {
             // Cuboid indices
-            uint[] indices = new uint[Position.Length];
-            for (uint i = 0; i < Position.Length; i++)
+            uint[] indices = new uint[Vertices.Length];
+            for (uint i = 0; i < Vertices.Length; i++)
             {
                 indices[i] = i;
    
