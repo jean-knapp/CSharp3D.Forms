@@ -60,33 +60,81 @@ namespace CSharp3D.Forms.Cameras
             Projection = Projections.Ortographic;
         }
 
-        public override Matrix4 GetViewMatrix(RendererControl rendererControl)
+        // Axis-locked presets for a Hammer-style quad view (World space: X forward, Y left, Z up).
+        // Rotation is (Roll, Pitch, Yaw) in degrees.
+        //
+        // The angles are chosen so each view's SCREEN AXES match Hammer's 2D views
+        // (hammer/mapview.h DrawType_t + axes2.h): Top = XY, Front = XZ, Side = YZ, each with its
+        // two axes increasing right and up. They were solved numerically against GetViewBasis
+        // rather than guessed — if a view ever looks rotated or mirrored, fix it here, in one
+        // place, and re-check the basis rather than compensating downstream.
+
+        /// <summary> Top view — looks down the Z axis onto the X/Y plane (right = +X, up = +Y). </summary>
+        public static OrtographicCamera CreateTop()
         {
-            // 1) Convert Rotation (degrees) and Location from World to GL space.
-            //    Rotation is (Roll, Pitch, Yaw) in degrees.
-            //    Location is (X, Y, Z) in world units.
+            return new OrtographicCamera(new RotationVector(0, -90, -90), new LocationVector(0, 0, 0));
+        }
 
-            Vector3 glRotation = VectorOrientation.ToGL(Rotation);
-            Vector3 glLocation = VectorOrientation.ToGL(GetLocation(rendererControl));
+        /// <summary> Front view — looks along the Y axis onto the X/Z plane (right = +X, up = +Z). </summary>
+        public static OrtographicCamera CreateFront()
+        {
+            return new OrtographicCamera(new RotationVector(0, 0, -90), new LocationVector(0, 0, 0));
+        }
 
-            // 2) Convert rotation from degrees to radians
-            glRotation *= MathHelper.Pi / 180f;
+        /// <summary> Side view — looks along the X axis onto the Y/Z plane (right = +Y, up = +Z). </summary>
+        public static OrtographicCamera CreateSide()
+        {
+            return new OrtographicCamera(new RotationVector(0, 0, 180), new LocationVector(0, 0, 0));
+        }
+
+        /// <summary>
+        /// The camera's rotation as a GL-space matrix. Split out of <see cref="GetViewMatrix"/> so
+        /// the pan/zoom code can derive the view basis without asking for the view matrix — that
+        /// would recurse, since the view matrix depends on <see cref="GetLocation"/>.
+        /// </summary>
+        private Matrix4 GetRotationMatrix()
+        {
+            // Rotation is (Roll, Pitch, Yaw) in degrees; convert to GL space, then to radians.
+            Vector3 glRotation = VectorOrientation.ToGL(Rotation) * MathHelper.Pi / 180f;
 
             Quaternion qPitch = Quaternion.FromAxisAngle(Vector3.UnitX, glRotation.X);
             Quaternion qYaw = Quaternion.FromAxisAngle(Vector3.UnitY, glRotation.Y);
             Quaternion qRoll = Quaternion.FromAxisAngle(Vector3.UnitZ, glRotation.Z);
 
-            Matrix4 rotationMatrix = Matrix4.CreateFromQuaternion(qRoll * qPitch * qYaw);
+            return Matrix4.CreateFromQuaternion(qRoll * qPitch * qYaw);
+        }
 
-            // Translate^-1
-            Matrix4 translationMatrix = Matrix4.CreateTranslation(-glLocation);
+        /// <summary>
+        /// The camera's screen axes in World units: <paramref name="right"/> is the world direction
+        /// that moves right across the view, <paramref name="up"/> the one that moves up it. For the
+        /// axis-locked presets these are world axes (e.g. Top: right = +X, up = +Y), but deriving
+        /// them from the rotation keeps pan and zoom correct for any orientation.
+        /// </summary>
+        public void GetViewBasis(out LocationVector right, out LocationVector up)
+        {
+            Vector3 glRight, glUp;
+            CameraMath.ViewBasis(GetRotationMatrix(), out glRight, out glUp);
 
-            // Final view matrix = Rotate^-1 * Translate^-1
-            //    Usually you multiply rotation * translation in this order
-            //    to get "R^-1 * T^-1".
-            Matrix4 viewMatrix = translationMatrix * rotationMatrix;
+            right = VectorOrientation.ToWorldLocation(glRight);
+            up = VectorOrientation.ToWorldLocation(glUp);
+        }
 
-            return viewMatrix;
+        public override Matrix4 GetViewMatrix(RendererControl rendererControl)
+        {
+            Vector3 glLocation = VectorOrientation.ToGL(GetLocation(rendererControl));
+
+            // Final view matrix = Rotate^-1 * Translate^-1.
+            return Matrix4.CreateTranslation(-glLocation) * GetRotationMatrix();
+        }
+
+        /// <summary>
+        /// World units per screen pixel. Both axes share one value: the projection is
+        /// OrthoScale*aspect wide over `width` pixels and OrthoScale tall over `height`, and
+        /// aspect = width/height, so the two ratios are equal.
+        /// </summary>
+        private float GetUnitsPerPixel(int controlHeight)
+        {
+            return controlHeight > 0 ? OrthoScale / controlHeight : OrthoScale;
         }
 
         public override Matrix4 GetProjectionMatrix(int controlWidth, int controlHeight)
@@ -121,20 +169,27 @@ namespace CSharp3D.Forms.Cameras
             if (IsMiddleMouseButtonDown)
             {
                 Vector2 mouseDelta = GetMouseDelta();
+                float unitsPerPixel = GetUnitsPerPixel(rendererControl.Height);
 
-                // Convert pixel movement to world-space movement
-                float unitsPerPixel = OrthoScale / rendererControl.Height;
+                // Pan along the camera's own screen axes, not fixed world X/Y — otherwise every
+                // view but a front-facing one drags along the wrong plane (and partly into the
+                // view axis, which an orthographic camera cannot even show).
+                LocationVector right, up;
+                GetViewBasis(out right, out up);
 
-                // Invert X or Y as you like for a “natural” drag feel
-                float moveX = mouseDelta.X * unitsPerPixel;
-                float moveY = mouseDelta.Y * unitsPerPixel;
-
-                // Adjust location
-                location.X += moveX;
-                location.Y += moveY;
+                // GetMouseDelta already negates screen X and keeps screen Y (which grows downward),
+                // so adding both moves the camera opposite the cursor: the model follows the mouse.
+                location = location
+                    + Scaled(right, mouseDelta.X * unitsPerPixel)
+                    + Scaled(up, mouseDelta.Y * unitsPerPixel);
             }
 
             return location;
+        }
+
+        private static LocationVector Scaled(LocationVector v, float scale)
+        {
+            return new LocationVector(v.X * scale, v.Y * scale, v.Z * scale);
         }
 
         public override void MouseDown(RendererControl rendererControl, MouseButtons button)
@@ -160,83 +215,34 @@ namespace CSharp3D.Forms.Cameras
 
         public override void MouseWheel(RendererControl rendererControl, MouseEventArgs e)
         {
-            // 1) The screen position (mouse in control coords)
-            Vector2 mouseScreenPos = new Vector2(e.X, e.Y);
+            // Zoom about the cursor: the world point under it must not move. That point sits at
+            // Location + right*(px*unitsPerPixel) + up*(-py*unitsPerPixel), where px/py are the
+            // cursor's offset from the view centre — so when unitsPerPixel changes by `duPP`, the
+            // camera has to shift by that same expression scaled by duPP to compensate.
+            float pxFromCenter = e.X - rendererControl.Width / 2f;
+            float pyFromCenter = e.Y - rendererControl.Height / 2f;
 
-            // 2) Convert that to a world position BEFORE zoom changes
-            Vector2 oldWorldPos = ScreenToWorld(
-                mouseScreenPos,
-                new Vector2(Location.X, Location.Y),
-                OrthoScale,
-                rendererControl.Width,
-                rendererControl.Height
-            );
+            float oldUnitsPerPixel = GetUnitsPerPixel(rendererControl.Height);
 
-            // 3) Apply the zoom
-            // e.Delta is typically ±120 per notch, so let's do a mild exponential
+            // e.Delta is typically ±120 per notch, so this is a mild exponential.
             float zoomFactor = (float)Math.Pow(1.05, e.Delta / 40.0);
             OrthoScale /= zoomFactor;
 
-            // Optionally clamp so we don't get negative or insane values
+            // Clamp so we don't get negative or insane values.
             if (OrthoScale < 0.1f) OrthoScale = 0.1f;
             if (OrthoScale > 100000f) OrthoScale = 100000f;
 
-            // 4) Convert the same mouse screen position to a world position AFTER the new scale
-            Vector2 newWorldPos = ScreenToWorld(
-                mouseScreenPos,
-                new Vector2(Location.X, Location.Y),
-                OrthoScale,
-                rendererControl.Width,
-                rendererControl.Height
-            );
+            float deltaUnitsPerPixel = oldUnitsPerPixel - GetUnitsPerPixel(rendererControl.Height);
 
-            // 5) Adjust the camera Location so that oldWorldPos is still under the mouse
-            // That means we translate the camera by the difference:
-            Vector2 worldOffset = oldWorldPos - newWorldPos;
-            Location = new LocationVector(
-                Location.X + worldOffset.X,
-                Location.Y + worldOffset.Y,
-                Location.Z
-            );
+            // Along the camera's own axes, so the anchor holds in every view orientation.
+            LocationVector right, up;
+            GetViewBasis(out right, out up);
 
-            // Optionally call base if you want, but be sure base doesn't undo your logic
+            Location = Location
+                + Scaled(right, pxFromCenter * deltaUnitsPerPixel)
+                + Scaled(up, -pyFromCenter * deltaUnitsPerPixel);
+
             base.MouseWheel(rendererControl, e);
-        }
-
-        /// <summary>
-        /// 
-        /// </summary>
-        /// <param name="screenPos"></param>
-        /// <param name="cameraLoc"></param>
-        /// <param name="orthoScale"></param>
-        /// <param name="controlWidth"></param>
-        /// <param name="controlHeight"></param>
-        /// <returns></returns>
-        private Vector2 ScreenToWorld(Vector2 screenPos, Vector2 cameraLoc, float orthoScale, int controlWidth, int controlHeight)
-        {
-            // The camera is typically centered at the middle of the screen in orthographic
-            // so let's define (controlWidth/2, controlHeight/2) as the cameraLoc in screen space.
-
-            float aspect = (float)controlWidth / controlHeight;
-
-            // This is how many world units 1 pixel corresponds to (vertically).
-            float unitsPerPixelY = orthoScale / controlHeight;
-            // For X, scale the same fraction, but multiplied by aspect:
-            float unitsPerPixelX = unitsPerPixelY;
-
-            // Offset from the screen center in pixels:
-            float pxFromCenter = screenPos.X - (controlWidth / 2f);
-            float pyFromCenter = screenPos.Y - (controlHeight / 2f);
-
-            // Convert pixel offset to world offset:
-            float dxWorld = pxFromCenter * unitsPerPixelX;
-            float dyWorld = -pyFromCenter * unitsPerPixelY;
-            // note the minus sign if Y is “inverted” (top-left vs. bottom-left).
-
-            // The final world coords = cameraLoc + offset
-            Vector2 worldPos = cameraLoc + new Vector2(dxWorld, dyWorld);
-
-            return worldPos;
         }
     }
 }

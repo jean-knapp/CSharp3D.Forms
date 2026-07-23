@@ -32,6 +32,16 @@ namespace CSharp3D.Forms.Controls
         public event EventHandler<EventArgs> CameraMove;
 
         /// <summary>
+        /// Occurs once per rendered frame, right before the scene is drawn. Use this for
+        /// per-frame simulation updates: unlike a WinForms Timer (WM_TIMER), it keeps firing
+        /// during continuous redraw loops (e.g. camera drags), when a permanently pending
+        /// WM_PAINT starves WM_TIMER and freezes timer-driven animation.
+        /// </summary>
+        [Category("Renderer")]
+        [Description("Occurs once per rendered frame, before the scene is drawn. Use for per-frame simulation updates; keeps firing during continuous redraws (camera drags) when WinForms timers are starved.")]
+        public event EventHandler<FrameUpdateEventArgs> FrameUpdate;
+
+        /// <summary>
         /// The scene to render. The scene contains all the meshes and lights to render.
         /// </summary>
         [Category("Renderer")]
@@ -44,6 +54,33 @@ namespace CSharp3D.Forms.Controls
         [Category("Renderer")]
         [Description("The camera to use for rendering. The camera determines the view of the scene.")]
         public Camera Camera { get; set; }
+
+        /// <summary>
+        /// How this view draws the scene: textured, flat-shaded, or wireframe. Per view, so several
+        /// views can show one shared scene differently.
+        /// </summary>
+        [Category("Renderer")]
+        [Description("How this view draws the scene: textured, flat-shaded, or wireframe.")]
+        public MeshDrawMode DrawMode { get; set; } = MeshDrawMode.Textured;
+
+        /// <summary>
+        /// Meshes drawn only by this control, after the shared <see cref="Scene"/>. Several views
+        /// commonly share one scene (a quad viewport does), so anything that belongs to a single
+        /// view — a per-view grid, a view-local gizmo — cannot live in the scene without showing
+        /// up in all of them. Put it here instead.
+        /// </summary>
+        [Browsable(false)]
+        public List<Mesh> ViewMeshes { get; } = new List<Mesh>();
+
+        /// <summary>
+        /// Which mouse buttons are handed to the camera. A host that drives editing tools through
+        /// the control's mouse events can remove a button (typically Left) from this mask to keep
+        /// the camera from grabbing the cursor while a tool owns that button.
+        /// </summary>
+        [Category("Renderer")]
+        [Description("Which mouse buttons are handed to the camera for navigation. Remove a button (e.g. Left) while a tool owns it.")]
+        public MouseButtons CameraMouseButtons { get; set; } =
+            MouseButtons.Left | MouseButtons.Middle | MouseButtons.Right;
 
         /// <summary>
         /// Specifies the depth buffer's precision in bits. The depth buffer is used for depth testing, determining which objects are in front of others. A common value is 24 bits.
@@ -86,6 +123,20 @@ namespace CSharp3D.Forms.Controls
         [Category("Renderer")]
         [Description("Whether the refresh of the renderer console is not done by an external object. Set this to false if there is a thread that continuous invalidate this renderer control.")]
         public bool AutoInvalidate { get; set; } = true;
+
+        /// <summary>
+        /// Whether moving the cursor over this view gives it keyboard focus, without a click. The
+        /// wheel already zooms the view under the cursor, so requiring a click before WASD works
+        /// (a <see cref="FreeLookCamera"/>) makes the keyboard the odd one out — especially with
+        /// several views on screen, where the focused one is not the one being pointed at.
+        ///
+        /// Only ever steals focus while this view's own window is the active one: a cursor sweeping
+        /// across the app must not yank focus out of a text box in another window the user is
+        /// typing into.
+        /// </summary>
+        [Category("Renderer")]
+        [Description("Whether hovering the view gives it keyboard focus, so WASD works without clicking first.")]
+        public bool FocusOnHover { get; set; } = false;
 
         /// <summary>
         /// The graphics context for the control.
@@ -141,12 +192,22 @@ namespace CSharp3D.Forms.Controls
             if (!(LicenseManager.UsageMode != LicenseUsageMode.Runtime))
             {
                 glControl.Load += GLControl_Load;
-                glControl.Paint += GLControl_Paint;
+                // NOTE: Paint is already subscribed in the constructor (needed for the
+                // design-mode fill too) — subscribing it again here rendered every
+                // frame twice at runtime.
                 glControl.Resize += GLControl_Resize;
                 glControl.MouseDown += GLControl_MouseDown;
                 glControl.MouseWheel += GLControl_MouseWheel;
                 glControl.KeyDown += GlControl_KeyDown;
                 glControl.KeyUp += GlControl_KeyUp;
+
+                // The inner GLControl covers the whole surface, so the UserControl's own mouse
+                // events would never fire. Re-raise them here so hosts can wire tools (picking,
+                // dragging) and QuadViewControl's DoubleClick maximize actually receives clicks.
+                glControl.MouseMove += (s, e) => OnMouseMove(e);
+                glControl.MouseUp += (s, e) => OnMouseUp(e);
+                glControl.DoubleClick += (s, e) => OnDoubleClick(e);
+                glControl.MouseEnter += GLControl_MouseEnter;
             }
         }
 
@@ -248,6 +309,10 @@ namespace CSharp3D.Forms.Controls
 
             glControl.MakeCurrent();
 
+            // Per-frame update hook (update-then-draw). Raised with the context current so
+            // handlers may create/destroy scene resources before the meshes are enumerated.
+            FrameUpdate?.Invoke(this, new FrameUpdateEventArgs(deltaTime));
+
             GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
             // Set the projection and view matrices
@@ -256,9 +321,28 @@ namespace CSharp3D.Forms.Controls
 
             List<Mesh> transparentMeshes = new List<Mesh>();
 
+            // This view's own meshes (grid, overlays) draw first, behind the shared scene. They
+            // are always drawn as-is: a grid or a handle means the same thing in every draw mode.
+            foreach (Mesh mesh in ViewMeshes)
+            {
+                if (mesh.IsVisibleIn(DrawMode))
+                    mesh.DrawMesh(Context, Scene, projection, view);
+            }
+
+            // Wireframe is a polygon-fill state, so it only affects triangle meshes — line and
+            // point overlays keep drawing normally, which is what we want.
+            if (DrawMode == MeshDrawMode.Wireframe)
+                GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Line);
+
             // Draw opaque meshes
             foreach (Mesh mesh in Scene.Meshes)
             {
+                // Views only draw the scene meshes aimed at their draw mode (a Hammer
+                // quad view keeps face geometry out of wireframe panes and outline
+                // meshes out of the textured pane).
+                if (!mesh.IsVisibleIn(DrawMode))
+                    continue;
+
                 // Check if mesh is transparent
                 if (mesh.Material != null && (mesh.Material.Translucent || mesh.Material.Additive || mesh.Material.Alpha < 1))
                 {
@@ -269,7 +353,7 @@ namespace CSharp3D.Forms.Controls
                 else
                 {
                     // Draw it now if it's solid
-                    mesh.DrawMesh(Context, Scene, projection, view);
+                    mesh.DrawMesh(Context, Scene, projection, view, DrawMode);
                 }
             }
 
@@ -286,7 +370,7 @@ namespace CSharp3D.Forms.Controls
 
                 foreach (Mesh mesh in sortedTransparentMeshes)
                 {
-                    mesh.DrawMesh(Context, Scene, projection, view);
+                    mesh.DrawMesh(Context, Scene, projection, view, DrawMode);
                 }
             }
             else
@@ -295,11 +379,16 @@ namespace CSharp3D.Forms.Controls
                 var sortedTransparentMeshes = transparentMeshes;
                 foreach (Mesh mesh in sortedTransparentMeshes)
                 {
-                    mesh.DrawMesh(Context, Scene, projection, view);
+                    mesh.DrawMesh(Context, Scene, projection, view, DrawMode);
                 }
             }
 
             GL.DepthMask(true);
+
+            // Leave the fill state as we found it: it is global, and the next control to paint
+            // shares this GL state machine.
+            if (DrawMode == MeshDrawMode.Wireframe)
+                GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Fill);
 
             bool shouldInvalidate = false;
 
@@ -394,15 +483,51 @@ namespace CSharp3D.Forms.Controls
         }
 
         /// <summary>
+        /// Gives the render surface keyboard focus without requiring a click — so a host can, for
+        /// instance, focus this view on mouse-enter and let WASD (a <see cref="FreeLookCamera"/>)
+        /// work as soon as the cursor is over it. The inner GL control is what actually receives key
+        /// events, so plain <see cref="Control.Focus"/> on this (outer) UserControl is not enough.
+        /// </summary>
+        public void FocusRenderSurface()
+        {
+            if (glControl != null && glControl.CanFocus)
+                glControl.Focus();
+        }
+
+        /// <summary>
+        /// Hover focus, when <see cref="FocusOnHover"/> is on: the view under the cursor takes the
+        /// keyboard, matching where the wheel already goes. Gated on this view's window being the
+        /// active one so a cursor crossing the app can't pull focus away from another window.
+        /// </summary>
+        private void GLControl_MouseEnter(object sender, EventArgs e)
+        {
+            if (!FocusOnHover)
+                return;
+
+            Form form = FindForm();
+            if (form == null || form != Form.ActiveForm)
+                return;
+
+            FocusRenderSurface();
+        }
+
+        /// <summary>
         /// Mouse down event for the GLControl.
         /// </summary>
         /// <param name="sender"> The sender. </param>
         /// <param name="e"> The event arguments. </param>
         private void GLControl_MouseDown(object sender, MouseEventArgs e)
         {
-            Camera.MouseDown(this, e.Button);
+            // Take keyboard focus so key input (WASD fly for a FreeLookCamera, and host key handlers)
+            // reaches this view — clicking a 3D view to drive it is the expected behavior.
+            FocusRenderSurface();
+
+            if ((CameraMouseButtons & e.Button) != 0)
+                Camera.MouseDown(this, e.Button);
 
             Scene.PickMesh(this, Camera, e);
+
+            OnMouseDown(e);
 
             if (AutoInvalidate)
                 glControl.Invalidate();
@@ -428,6 +553,8 @@ namespace CSharp3D.Forms.Controls
 
             Camera.KeyDown(this, e.KeyCode);
 
+            OnKeyDown(e);
+
             if (AutoInvalidate)
                 glControl.Invalidate();
         }
@@ -437,8 +564,26 @@ namespace CSharp3D.Forms.Controls
             // Mark this key as released
             keysDown[e.KeyCode] = false;
 
+            OnKeyUp(e);
+
             if (AutoInvalidate)
                 glControl.Invalidate();
         }
+    }
+
+    /// <summary>
+    /// Event data for <see cref="RendererControl.FrameUpdate"/>.
+    /// </summary>
+    public class FrameUpdateEventArgs : EventArgs
+    {
+        public FrameUpdateEventArgs(double deltaTime)
+        {
+            DeltaTime = deltaTime;
+        }
+
+        /// <summary>
+        /// Seconds elapsed since the previous rendered frame (0 after a long stall).
+        /// </summary>
+        public double DeltaTime { get; }
     }
 }

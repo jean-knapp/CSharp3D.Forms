@@ -269,6 +269,30 @@ namespace CSharp3D.Forms.Cameras
             return pickingRay;
         }
 
+        /// <summary>
+        /// The GL-space picking ray through a screen pixel, correct for both perspective and
+        /// orthographic projections (unlike <see cref="GetPickingRay"/>, which assumes a single eye
+        /// point). Use with <see cref="CameraMath.RayTriangle"/> for mesh picking.
+        /// </summary>
+        public void ScreenRayGL(RendererControl rendererControl, float screenX, float screenY,
+            out Vector3 origin, out Vector3 direction)
+        {
+            CameraMath.ScreenRay(
+                GetViewMatrix(rendererControl),
+                GetProjectionMatrix(rendererControl.Width, rendererControl.Height),
+                screenX, screenY, rendererControl.Width, rendererControl.Height,
+                out origin, out direction);
+        }
+
+        /// <summary> Projects a GL-space world point to a screen pixel (for placing 2D handles). </summary>
+        public Vector2 ProjectToScreenGL(RendererControl rendererControl, Vector3 worldGL, out float ndcZ)
+        {
+            return CameraMath.ProjectToScreen(
+                GetViewMatrix(rendererControl),
+                GetProjectionMatrix(rendererControl.Width, rendererControl.Height),
+                worldGL, rendererControl.Width, rendererControl.Height, out ndcZ);
+        }
+
         protected void RecenterMouse(RendererControl rendererControl)
         {
             // Recenter mouse
