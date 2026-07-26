@@ -185,6 +185,21 @@ namespace CSharp3D.Forms.Meshes
         }
 
         /// <summary>
+        /// Drop this mesh's record of its GPU resources WITHOUT deleting them — the
+        /// caller (<see cref="Scene.ScheduleDispose"/>) has taken ownership of the ids
+        /// and will delete them once the owning context is current. The mesh is left
+        /// looking un-uploaded, so drawing it again just re-creates its buffers.
+        /// </summary>
+        internal void ForgetGpuResources()
+        {
+            vao.Clear();
+            vbo.Clear();
+            ebo.Clear();
+            _staleVertexContexts.Clear();
+            _uploadedIndexCounts.Clear();
+        }
+
+        /// <summary>
         /// Get the vertex array of the mesh.
         /// </summary>
         /// <returns> The vertex array of the mesh. </returns>
@@ -205,6 +220,20 @@ namespace CSharp3D.Forms.Meshes
             // Index data
             uint[] indices = { };
             return indices;
+        }
+
+        /// <summary>
+        /// How many indices <see cref="GetIndexArray"/> would return, WITHOUT building it.
+        ///
+        /// The draw path needs only the count, and <see cref="GetIndexArray"/> allocates
+        /// a fresh array on most meshes — calling it per draw meant an allocation per
+        /// mesh per frame per pane. Meshes whose index count is a simple function of the
+        /// vertices (see <see cref="QuakeFaceMesh"/>) should override this; the default
+        /// falls back to the array so existing meshes keep working unchanged.
+        /// </summary>
+        public virtual int GetIndexCount()
+        {
+            return GetIndexArray().Length;
         }
 
         /// <summary>
@@ -345,13 +374,13 @@ namespace CSharp3D.Forms.Meshes
             if (!_uploadedIndexCounts.TryGetValue(context, out uploaded))
                 return true;
 
-            return uploaded != GetIndexArray().Length;
+            return uploaded != GetIndexCount();
         }
 
         /// <summary> Records that <paramref name="context"/>'s index buffer matches the mesh. </summary>
         public void MarkIndexBufferUploaded(object context)
         {
-            _uploadedIndexCounts[context] = GetIndexArray().Length;
+            _uploadedIndexCounts[context] = GetIndexCount();
         }
 
         /// <summary>
@@ -494,41 +523,60 @@ namespace CSharp3D.Forms.Meshes
 
                 int shaderProgram = Material.Shader.GetShaderId(context, scene);
 
-                // Only the textured mode samples the albedo; solid and wireframe fall back to the
+                // Only the textured modes sample the albedo; solid and wireframe fall back to the
                 // material's flat colour, which is what makes them readable.
-                bool useAlbedo = drawMode == MeshDrawMode.Textured
+                bool useAlbedo = (drawMode == MeshDrawMode.Textured || drawMode == MeshDrawMode.TexturedShaded)
                     && Material.Albedo != null && Material.Albedo.Bitmap != null;
 
-                int useDiffuseTextureLocation = GL.GetUniformLocation(shaderProgram, "uUseDiffuseTexture");
+                int useDiffuseTextureLocation = Shader.GetUniformLocation(context, shaderProgram, "uUseDiffuseTexture");
                 GL.Uniform1(useDiffuseTextureLocation, useAlbedo ? 1 : 0);
 
-                int useNormalTextureLocation = GL.GetUniformLocation(shaderProgram, "uUseNormalTexture");
+                // Hammer's fixed-direction face shade (LightPlane, render3dms.cpp:154).
+                // It needs no scene lights, which is the point: it exists so geometry
+                // reads in an editor viewport, not to be physically meaningful.
+                bool shade = drawMode == MeshDrawMode.TexturedShaded || drawMode == MeshDrawMode.Solid;
+
+                int shadeLocation = Shader.GetUniformLocation(context, shaderProgram, "uFaceShade");
+                if (shadeLocation >= 0)
+                    GL.Uniform1(shadeLocation, shade ? 1 : 0);
+
+                // Editor viewports light nothing: the texture is the information, and the
+                // scene's lights would only darken it. Set per scene rather than derived
+                // from the draw mode, so a viewer that WANTS lit textured geometry keeps
+                // it (see Scene.FullBright).
+                int fullBrightLocation = Shader.GetUniformLocation(context, shaderProgram, "uFullBright");
+                if (fullBrightLocation >= 0)
+                    GL.Uniform1(fullBrightLocation, scene != null && scene.FullBright ? 1 : 0);
+
+                int useNormalTextureLocation = Shader.GetUniformLocation(context, shaderProgram, "uUseNormalTexture");
                 GL.Uniform1(useNormalTextureLocation, Material.Normal != null && Material.Normal.Bitmap != null ? 1 : 0);
 
-                int useSpecularTextureLocation = GL.GetUniformLocation(shaderProgram, "uUseSpecularTexture");
+                int useSpecularTextureLocation = Shader.GetUniformLocation(context, shaderProgram, "uUseSpecularTexture");
                 GL.Uniform1(useSpecularTextureLocation, Material.Specular != null && Material.Specular.Bitmap != null ? 1 : 0);
 
-                int specularStrengthLocation = GL.GetUniformLocation(shaderProgram, "uSpecularStrength");
+                int specularStrengthLocation = Shader.GetUniformLocation(context, shaderProgram, "uSpecularStrength");
                 GL.Uniform1(specularStrengthLocation, Material.SpecularStrength);
 
-                int addSelfLocation = GL.GetUniformLocation(shaderProgram, "uAddSelf");
+                int addSelfLocation = Shader.GetUniformLocation(context, shaderProgram, "uAddSelf");
                 GL.Uniform1(addSelfLocation, Material.AddSelf);
 
-                int overbrightFactorLocation = GL.GetUniformLocation(shaderProgram, "uOverbrightFactor");
+                int overbrightFactorLocation = Shader.GetUniformLocation(context, shaderProgram, "uOverbrightFactor");
                 GL.Uniform1(overbrightFactorLocation, Material.OverbrightFactor);
 
-                int colorLocation = GL.GetUniformLocation(shaderProgram, "uBaseColor");
+                int colorLocation = Shader.GetUniformLocation(context, shaderProgram, "uBaseColor");
                 GL.Uniform4(colorLocation, new Vector4(Material.Color.R / 255f, Material.Color.G / 255f, Material.Color.B / 255f, Material.Alpha));
 
-                int lightPositionLocation = GL.GetUniformLocation(shaderProgram, "uLightPosition");
-                int lightColorLocation = GL.GetUniformLocation(shaderProgram, "uLightColor");
-                int ambientColorLocation = GL.GetUniformLocation(shaderProgram, "uAmbientColor");
-                int lightAttenuationLocation = GL.GetUniformLocation(shaderProgram, "uLightAttenuation");
-                // Prepare arrays for MAX_LIGHTS light sources
-                float[] lightPositions = new float[MAX_LIGHTS * 3]; // MAX_LIGHTS * 3 components
-                float[] lightColors = new float[MAX_LIGHTS * 4];    // MAX_LIGHTS * 4 components
-                float[] ambientColors = new float[MAX_LIGHTS * 4];  // MAX_LIGHTS * 4 components
-                float[] lightAttenuations = new float[MAX_LIGHTS * 3]; // MAX_LIGHTS * 3 components
+                int lightPositionLocation = Shader.GetUniformLocation(context, shaderProgram, "uLightPosition");
+                int lightColorLocation = Shader.GetUniformLocation(context, shaderProgram, "uLightColor");
+                int ambientColorLocation = Shader.GetUniformLocation(context, shaderProgram, "uAmbientColor");
+                int lightAttenuationLocation = Shader.GetUniformLocation(context, shaderProgram, "uLightAttenuation");
+                // Scratch buffers reused across draws. These used to be four fresh arrays
+                // per mesh per frame per pane; on a large map that is tens of millions of
+                // allocations a second and the GC pressure alone stalls the editor.
+                float[] lightPositions = LightPositionScratch;
+                float[] lightColors = LightColorScratch;
+                float[] ambientColors = AmbientColorScratch;
+                float[] lightAttenuations = LightAttenuationScratch;
 
                 // Set up all lights
                 for (int i = 0; i < MAX_LIGHTS; i++)
@@ -592,21 +640,31 @@ namespace CSharp3D.Forms.Meshes
                 GL.Uniform4(ambientColorLocation, MAX_LIGHTS, ambientColors);
                 GL.Uniform3(lightAttenuationLocation, MAX_LIGHTS, lightAttenuations);
 
-                int cameraPositionLocation = GL.GetUniformLocation(shaderProgram, "uCameraPosition");
+                int cameraPositionLocation = Shader.GetUniformLocation(context, shaderProgram, "uCameraPosition");
                 var cameraLocation = Camera.GetLocation(view);
                 GL.Uniform3(cameraPositionLocation, VectorOrientation.ToGL(cameraLocation));
 
                 // Set the projection matrix
-                int projLoc = GL.GetUniformLocation(shaderProgram, "uProjection");
+                int projLoc = Shader.GetUniformLocation(context, shaderProgram, "uProjection");
                 GL.UniformMatrix4(projLoc, false, ref projection);
 
                 // Set the view matrix
-                int viewLoc = GL.GetUniformLocation(shaderProgram, "uView");
+                int viewLoc = Shader.GetUniformLocation(context, shaderProgram, "uView");
                 GL.UniformMatrix4(viewLoc, false, ref view);
 
                 Matrix4 model = GetModelMatrix(view);
-                int modelLoc = GL.GetUniformLocation(shaderProgram, "uModel");
+                int modelLoc = Shader.GetUniformLocation(context, shaderProgram, "uModel");
                 GL.UniformMatrix4(modelLoc, false, ref model);
+
+                // Shader programs are shared between meshes, so per-mesh optional
+                // features must be reset every draw or the previous mesh's state leaks.
+                int useLightmapLocation = Shader.GetUniformLocation(context, shaderProgram, "uUseLightmap");
+                if (useLightmapLocation >= 0)
+                    GL.Uniform1(useLightmapLocation, 0);
+
+                // Subclass hook (e.g. QuakeFaceMesh's baked lightmap) — runs after all
+                // the standard uniforms, right before the draw call.
+                ApplyCustomUniforms(context, scene, shaderProgram, drawMode);
 
                 // Depth-mode override for tool overlays. Global GL state, so whatever was in effect
                 // is captured and restored right after the draw — the next mesh shares this state
@@ -626,7 +684,7 @@ namespace CSharp3D.Forms.Meshes
                 }
 
                 GL.BindVertexArray(vao[context]);
-                GL.DrawElements(PrimitiveType, GetIndexArray().Length, DrawElementsType.UnsignedInt, 0);
+                GL.DrawElements(PrimitiveType, GetIndexCount(), DrawElementsType.UnsignedInt, 0);
                 GL.BindVertexArray(0);
 
                 if (DepthMode == MeshDepthMode.Overlay)
@@ -645,6 +703,15 @@ namespace CSharp3D.Forms.Meshes
         }
 
         /// <summary>
+        /// Set additional per-mesh uniforms/textures right before the draw call. The
+        /// base implementation does nothing. Called with the mesh's shader program
+        /// bound; runs on the GL thread.
+        /// </summary>
+        protected virtual void ApplyCustomUniforms(object context, Scene scene, int shaderProgram, MeshDrawMode drawMode)
+        {
+        }
+
+        /// <summary>
         /// Get the distance of the mesh's origin to the camera.
         /// </summary>
         /// <param name="cameraPosition"> The camera's position. </param>
@@ -655,7 +722,101 @@ namespace CSharp3D.Forms.Meshes
             return (meshPosition - cameraPosition).Length;
         }
 
+        // ---- per-draw scratch, see the light-uniform block in DrawMesh ----
+
+        [ThreadStatic] private static float[] _lightPositionScratch;
+        [ThreadStatic] private static float[] _lightColorScratch;
+        [ThreadStatic] private static float[] _ambientColorScratch;
+        [ThreadStatic] private static float[] _lightAttenuationScratch;
+
+        private static float[] LightPositionScratch
+        {
+            get { return _lightPositionScratch ?? (_lightPositionScratch = new float[MAX_LIGHTS * 3]); }
+        }
+
+        private static float[] LightColorScratch
+        {
+            get { return _lightColorScratch ?? (_lightColorScratch = new float[MAX_LIGHTS * 4]); }
+        }
+
+        private static float[] AmbientColorScratch
+        {
+            get { return _ambientColorScratch ?? (_ambientColorScratch = new float[MAX_LIGHTS * 4]); }
+        }
+
+        private static float[] LightAttenuationScratch
+        {
+            get { return _lightAttenuationScratch ?? (_lightAttenuationScratch = new float[MAX_LIGHTS * 3]); }
+        }
+
         public LocationVector BoxMin, BoxMax;  // store in your Mesh class
+
+        /// <summary>
+        /// The same AABB in the mesh's own space, kept so the world box can be rebuilt
+        /// when the mesh moves without re-uploading its vertices. <see cref="HasBounds"/>
+        /// is false until the first upload computes them.
+        /// </summary>
+        private Vector3 localBoxMin, localBoxMax;
+
+        private Matrix4 boundsModelMatrix;
+
+        public bool HasBounds { get; private set; }
+
+        /// <summary>
+        /// World-space AABB for culling. Recomputed from the local box only when the
+        /// model matrix has actually changed since it was last built, so the common case
+        /// (static geometry) costs a matrix comparison per frame and nothing else.
+        /// Returns false when the mesh has never been uploaded and has no bounds yet.
+        /// </summary>
+        public bool TryGetWorldBounds(out Vector3 min, out Vector3 max)
+        {
+            min = max = Vector3.Zero;
+
+            if (!HasBounds)
+                return false;
+
+            Matrix4 model = GetModelMatrix(Matrix4.Identity);
+
+            if (model != boundsModelMatrix)
+            {
+                RebuildWorldBounds(model);
+                boundsModelMatrix = model;
+            }
+
+            min = worldBoxMin;
+            max = worldBoxMax;
+            return true;
+        }
+
+        private Vector3 worldBoxMin, worldBoxMax;
+
+        /// <summary>Transform the 8 local corners and re-fit an axis-aligned box.</summary>
+        private void RebuildWorldBounds(Matrix4 model)
+        {
+            Vector3 min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            Vector3 max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+
+            for (int corner = 0; corner < 8; corner++)
+            {
+                Vector3 local = new Vector3(
+                    (corner & 1) == 0 ? localBoxMin.X : localBoxMax.X,
+                    (corner & 2) == 0 ? localBoxMin.Y : localBoxMax.Y,
+                    (corner & 4) == 0 ? localBoxMin.Z : localBoxMax.Z);
+
+                Vector4 world = Vector4.Transform(new Vector4(local, 1.0f), model);
+
+                if (world.X < min.X) min.X = world.X;
+                if (world.Y < min.Y) min.Y = world.Y;
+                if (world.Z < min.Z) min.Z = world.Z;
+
+                if (world.X > max.X) max.X = world.X;
+                if (world.Y > max.Y) max.Y = world.Y;
+                if (world.Z > max.Z) max.Z = world.Z;
+            }
+
+            worldBoxMin = min;
+            worldBoxMax = max;
+        }
 
         private void ComputeBoundingBox(Mesh mesh)
         {
@@ -700,6 +861,35 @@ namespace CSharp3D.Forms.Meshes
 
             mesh.BoxMin = VectorOrientation.ToWorldLocation(min);
             mesh.BoxMax = VectorOrientation.ToWorldLocation(max);
+
+            // Local-space box + the matrix it was built with, for cheap culling later.
+            Vector3 localMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            Vector3 localMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+
+            for (int i = 0; i < vertexCount; i++)
+            {
+                float lx = vertices[i * 8 + 0];
+                float ly = vertices[i * 8 + 1];
+                float lz = vertices[i * 8 + 2];
+
+                if (lx < localMin.X) localMin.X = lx;
+                if (ly < localMin.Y) localMin.Y = ly;
+                if (lz < localMin.Z) localMin.Z = lz;
+
+                if (lx > localMax.X) localMax.X = lx;
+                if (ly > localMax.Y) localMax.Y = ly;
+                if (lz > localMax.Z) localMax.Z = lz;
+            }
+
+            if (vertexCount > 0)
+            {
+                mesh.localBoxMin = localMin;
+                mesh.localBoxMax = localMax;
+                mesh.worldBoxMin = min;
+                mesh.worldBoxMax = max;
+                mesh.boundsModelMatrix = modelMatrix;
+                mesh.HasBounds = true;
+            }
         }
     }
 }

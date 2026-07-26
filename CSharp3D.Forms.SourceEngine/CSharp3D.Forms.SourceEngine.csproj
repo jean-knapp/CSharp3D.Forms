@@ -7,8 +7,8 @@
     <ProjectGuid>{7FDE0ED5-6EF2-4B70-892C-66DE383F1938}</ProjectGuid>
     <OutputType>Library</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>CSharp.Forms.SourceEngine</RootNamespace>
-    <AssemblyName>CSharp.Forms.SourceEngine</AssemblyName>
+    <RootNamespace>CSharp3D.Forms.SourceEngine</RootNamespace>
+    <AssemblyName>CSharp3D.Forms.SourceEngine</AssemblyName>
     <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <Deterministic>true</Deterministic>
@@ -33,6 +33,7 @@
   <ItemGroup>
     <Reference Include="System" />
     <Reference Include="System.Core" />
+    <Reference Include="System.Numerics" />
     <Reference Include="System.Xml.Linq" />
     <Reference Include="System.Data.DataSetExtensions" />
     <Reference Include="Microsoft.CSharp" />
@@ -41,6 +42,14 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Lighting\BakeFace.cs" />
+    <Compile Include="Lighting\LightmapBaker.cs" />
+    <Compile Include="Lighting\LuxelGrid.cs" />
+    <Compile Include="Lighting\RayBvh.cs" />
+    <Compile Include="Lighting\RadFile.cs" />
+    <Compile Include="Lighting\SourceColorSpace.cs" />
+    <Compile Include="Lighting\SourceLight.cs" />
+    <Compile Include="Lighting\SourceLightParser.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>

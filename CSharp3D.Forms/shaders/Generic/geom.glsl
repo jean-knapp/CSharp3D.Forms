@@ -8,12 +8,14 @@ layout (triangle_strip, max_vertices = 3) out;
 out vec2 fragTexCoord;     // Pass the texture coordinates to the fragment shader
 out vec3 fragNormal;       // Pass the normal vector to the fragment shader for lighting calculations
 out vec3 fragPosition;     // Pass the transformed vertex position to the fragment shader
+out vec3 fragWorldPosition; // World space always, for lookups that must not be tangent space
 out vec3 fragLightPosition[MAX_LIGHTS];
 out vec3 fragCameraPosition;
 
 in vec2 geomTexCoord[];	// The texture coordinates for the geometry
 in vec3 geomNormal[]; 	// The normal vector for the geometry
 in vec3 geomPosition[]; 	// The transformed vertex position for the geometry
+in vec3 geomWorldPosition[];	// The world-space position for the geometry
 in mat4 geomModel[];
 
 uniform vec3 uLightPosition[MAX_LIGHTS];   // Light positions as uniforms
@@ -53,6 +55,7 @@ void main()
 	{
 		fragTexCoord = geomTexCoord[i];
 		fragNormal = geomNormal[i];
+		fragWorldPosition = geomWorldPosition[i];
 
 		if (uUseNormalTexture)
 		{

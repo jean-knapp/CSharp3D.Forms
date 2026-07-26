@@ -153,7 +153,7 @@ namespace CSharp3D.Forms.Engine
                 // Bind the texture
                 GL.ActiveTexture(TextureUnit.Texture0);
                 GL.BindTexture(TextureTarget.Texture2D, albedoMap.GetTextureId(context, scene));
-                GL.Uniform1(GL.GetUniformLocation(Shader.GetShaderId(context, scene), "diffuseTexture"), 0);
+                GL.Uniform1(Shader.GetUniformLocation(context, Shader.GetShaderId(context, scene), "diffuseTexture"), 0);
             }
 
             if (Specular != null && Specular.Bitmap != null) 
@@ -161,7 +161,7 @@ namespace CSharp3D.Forms.Engine
                 // Bind the texture
                 GL.ActiveTexture(TextureUnit.Texture1);
                 GL.BindTexture(TextureTarget.Texture2D, Specular.GetTextureId(context, scene));
-                GL.Uniform1(GL.GetUniformLocation(Shader.GetShaderId(context, scene), "specularTexture"), 1);
+                GL.Uniform1(Shader.GetUniformLocation(context, Shader.GetShaderId(context, scene), "specularTexture"), 1);
             }
 
             if (Normal != null && Normal.Bitmap != null) 
@@ -169,7 +169,7 @@ namespace CSharp3D.Forms.Engine
                 // Bind the texture
                 GL.ActiveTexture(TextureUnit.Texture2);
                 GL.BindTexture(TextureTarget.Texture2D, Normal.GetTextureId(context, scene));
-                GL.Uniform1(GL.GetUniformLocation(Shader.GetShaderId(context, scene), "normalTexture"), 2);
+                GL.Uniform1(Shader.GetUniformLocation(context, Shader.GetShaderId(context, scene), "normalTexture"), 2);
             }
 
             if (BackCulling)

@@ -9,6 +9,7 @@ using OpenTK.Graphics.OpenGL;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.Threading;
@@ -64,13 +65,29 @@ namespace CSharp3D.Forms.Controls
         public MeshDrawMode DrawMode { get; set; } = MeshDrawMode.Textured;
 
         /// <summary>
-        /// Meshes drawn only by this control, after the shared <see cref="Scene"/>. Several views
+        /// Meshes drawn only by this control, BEFORE the shared <see cref="Scene"/>. Several views
         /// commonly share one scene (a quad viewport does), so anything that belongs to a single
         /// view — a per-view grid, a view-local gizmo — cannot live in the scene without showing
         /// up in all of them. Put it here instead.
+        ///
+        /// Drawing first is what a backdrop wants: an ortho grid belongs behind the map, not over
+        /// it. Anything that has to survive the scene belongs in <see cref="OverlayMeshes"/>.
         /// </summary>
         [Browsable(false)]
         public List<Mesh> ViewMeshes { get; } = new List<Mesh>();
+
+        /// <summary>
+        /// Per-view meshes drawn AFTER the scene, so they can be depth-tested against it or drawn
+        /// over it.
+        ///
+        /// <see cref="MeshDepthMode"/> only means anything here: "in front of everything already
+        /// rendered" (Overlay) and "only where the scene covers it" (OccludedOnly) are both claims
+        /// about a depth buffer the scene has already written, so a mesh in <see cref="ViewMeshes"/>
+        /// making either of them is simply painted over by the geometry that follows it. Tool
+        /// guides — selection boxes, handles, drag previews — belong here.
+        /// </summary>
+        [Browsable(false)]
+        public List<Mesh> OverlayMeshes { get; } = new List<Mesh>();
 
         /// <summary>
         /// Which mouse buttons are handed to the camera. A host that drives editing tools through
@@ -125,6 +142,17 @@ namespace CSharp3D.Forms.Controls
         public bool AutoInvalidate { get; set; } = true;
 
         /// <summary>
+        /// Skip scene meshes whose bounding box is entirely outside the view volume.
+        /// On by default; turn it off to diagnose a suspected culling artifact.
+        /// </summary>
+        public bool FrustumCulling { get; set; } = true;
+
+        /// <summary>Meshes skipped / drawn by the last frame — for diagnostics.</summary>
+        public int CulledMeshCount { get; private set; }
+
+        public int DrawnMeshCount { get; private set; }
+
+        /// <summary>
         /// Whether moving the cursor over this view gives it keyboard focus, without a click. The
         /// wheel already zooms the view under the cursor, so requiring a click before WASD works
         /// (a <see cref="FreeLookCamera"/>) makes the keyboard the odd one out — especially with
@@ -149,7 +177,8 @@ namespace CSharp3D.Forms.Controls
             }
         }
 
-        private double lastFrameTime = 0;
+        /// <summary>High-resolution timestamp of the previous frame; 0 = no frame yet.</summary>
+        private long lastFrameTimestamp = 0;
 
         private Dictionary<Keys, bool> keysDown = new Dictionary<Keys, bool>();
 
@@ -207,6 +236,11 @@ namespace CSharp3D.Forms.Controls
                 glControl.MouseMove += (s, e) => OnMouseMove(e);
                 glControl.MouseUp += (s, e) => OnMouseUp(e);
                 glControl.DoubleClick += (s, e) => OnDoubleClick(e);
+                // MouseDoubleClick is raised from the message loop of whichever control got
+                // the WM_*BUTTONDBLCLK — that is the inner GLControl, never this one — so a
+                // host wanting the button and position of a double click (map editor: open
+                // the properties of the object under the cursor) needs it forwarded too.
+                glControl.MouseDoubleClick += (s, e) => OnMouseDoubleClick(e);
                 glControl.MouseEnter += GLControl_MouseEnter;
             }
         }
@@ -264,20 +298,42 @@ namespace CSharp3D.Forms.Controls
         }
 
         /// <summary>
-        /// Calculates the elapsed time since the last time the GlControl was painted.
+        /// Longest frame time that still drives simulation, in seconds. A frame slower
+        /// than this advances the world by this much and no more, so returning from a
+        /// stall (a modal dialog, a long rebuild) cannot teleport the camera.
+        ///
+        /// It is a CLAMP, not a discard. It used to zero the delta instead, which meant
+        /// any frame slower than 50 ms moved the camera not at all — so on a map big
+        /// enough to render below 20 fps the camera simply would not move, and near that
+        /// threshold it lurched between stopped and full speed as frames crossed it.
         /// </summary>
-        /// <returns> The delta time, in seconds.
+        private const double MaxFrameDelta = 0.1;
+
+        /// <summary>
+        /// Elapsed time since the last paint of the GlControl, in seconds.
+        /// </summary>
         private double GetDeltaTime()
         {
-            double currentTime = (double)Environment.TickCount / 1000.0;
-            double deltaTime = currentTime - lastFrameTime;
-            lastFrameTime = currentTime;
+            // Stopwatch, not Environment.TickCount: TickCount only advances every ~15.6 ms,
+            // so at any decent frame rate most frames measured exactly zero elapsed time
+            // and the occasional one measured a whole tick — movement arrived in lumps
+            // rather than smoothly.
+            long now = Stopwatch.GetTimestamp();
 
-            // This is a workaround so we skip the first deltatime update if it's been too long since the last paint.
-            if (deltaTime > 0.05)
+            if (lastFrameTimestamp == 0)
             {
-                deltaTime = 0;
+                lastFrameTimestamp = now;
+                return 0;
             }
+
+            double deltaTime = (now - lastFrameTimestamp) / (double)Stopwatch.Frequency;
+            lastFrameTimestamp = now;
+
+            if (deltaTime < 0)
+                deltaTime = 0;              // clock went backwards; skip this frame
+
+            if (deltaTime > MaxFrameDelta)
+                deltaTime = MaxFrameDelta;
 
             return deltaTime;
         }
@@ -315,6 +371,10 @@ namespace CSharp3D.Forms.Controls
 
             GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
+            // This context is current here, so it is the only safe place to free the GL
+            // objects of meshes the scene dropped since the last paint.
+            Scene?.ProcessPendingDeletions(Context);
+
             // Set the projection and view matrices
             Matrix4 projection = Camera.GetProjectionMatrix(glControl.Width, glControl.Height);
             Matrix4 view = Camera.GetViewMatrix(this);
@@ -334,6 +394,14 @@ namespace CSharp3D.Forms.Controls
             if (DrawMode == MeshDrawMode.Wireframe)
                 GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Line);
 
+            // Frustum culling, the role Hammer's cull tree + IsBoxVisible play: on a large
+            // map the scene holds tens of thousands of face meshes and drawing every one
+            // of them in every pane, every frame, is what makes flying around crawl.
+            ViewFrustum frustum = ViewFrustum.FromViewProjection(view * projection);
+
+            CulledMeshCount = 0;
+            DrawnMeshCount = 0;
+
             // Draw opaque meshes
             foreach (Mesh mesh in Scene.Meshes)
             {
@@ -342,6 +410,22 @@ namespace CSharp3D.Forms.Controls
                 // meshes out of the textured pane).
                 if (!mesh.IsVisibleIn(DrawMode))
                     continue;
+
+                if (FrustumCulling)
+                {
+                    OpenTK.Vector3 boundsMin, boundsMax;
+
+                    // Meshes with no bounds yet (never uploaded) always draw — the upload
+                    // happens inside the draw call.
+                    if (mesh.TryGetWorldBounds(out boundsMin, out boundsMax)
+                        && !frustum.Intersects(boundsMin, boundsMax))
+                    {
+                        CulledMeshCount++;
+                        continue;
+                    }
+                }
+
+                DrawnMeshCount++;
 
                 // Check if mesh is transparent
                 if (mesh.Material != null && (mesh.Material.Translucent || mesh.Material.Additive || mesh.Material.Alpha < 1))
@@ -389,6 +473,14 @@ namespace CSharp3D.Forms.Controls
             // shares this GL state machine.
             if (DrawMode == MeshDrawMode.Wireframe)
                 GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Fill);
+
+            // Per-view overlays, last, so their depth modes have the scene's depth buffer to
+            // work against — see OverlayMeshes.
+            foreach (Mesh mesh in OverlayMeshes)
+            {
+                if (mesh.IsVisibleIn(DrawMode))
+                    mesh.DrawMesh(Context, Scene, projection, view);
+            }
 
             bool shouldInvalidate = false;
 

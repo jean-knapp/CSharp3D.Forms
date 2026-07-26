@@ -1,5 +1,6 @@
 ﻿using CSharp3D.Forms.Engine;
 using OpenTK;
+using OpenTK.Graphics.OpenGL;
 using System.ComponentModel;
 
 namespace CSharp3D.Forms.Meshes
@@ -10,6 +11,69 @@ namespace CSharp3D.Forms.Meshes
     [ToolboxItem(false)]
     public class QuakeFaceMesh : Mesh
     {
+        /// <summary>
+        /// Optional baked lightmap. When set (and the lightmap has data), the fragment
+        /// shader replaces dynamic lighting with albedo × lightmap for this face.
+        /// The texture object is shared across scene rebuilds — the owner keys it by
+        /// face, not by mesh.
+        /// </summary>
+        [Browsable(false)]
+        public LightmapTexture Lightmap { get; set; }
+
+        /// <summary>
+        /// Lightmap UV mapping, world space: u_luxel = dot(P, LightmapAxisU) + LightmapOffsetU
+        /// (axis pre-divided by the luxel size, offset = -MinS + 0.5 so texel centers land
+        /// on vrad's integer lattice). Same for V. The shader converts to GL orientation.
+        /// </summary>
+        [Browsable(false)]
+        public Vector3 LightmapAxisU { get; set; }
+
+        [Browsable(false)]
+        public Vector3 LightmapAxisV { get; set; }
+
+        [Browsable(false)]
+        public float LightmapOffsetU { get; set; }
+
+        [Browsable(false)]
+        public float LightmapOffsetV { get; set; }
+
+        [Browsable(false)]
+        public float LightmapWidth { get; set; }
+
+        [Browsable(false)]
+        public float LightmapHeight { get; set; }
+
+        /// <summary>
+        /// Bind the baked lightmap for the draw, if there is one. fragPosition in the
+        /// shader is GL-oriented world space; a world-space dot product survives the
+        /// axis permutation (it's orthonormal), so the axes just get converted.
+        /// </summary>
+        protected override void ApplyCustomUniforms(object context, Scene scene, int shaderProgram, MeshDrawMode drawMode)
+        {
+            if (Lightmap == null || drawMode != MeshDrawMode.Textured || LightmapWidth <= 0 || LightmapHeight <= 0)
+                return;
+
+            int textureId = Lightmap.GetTextureId(context);
+            if (textureId == 0)
+                return;
+
+            GL.ActiveTexture(TextureUnit.Texture3);
+            GL.BindTexture(TextureTarget.Texture2D, textureId);
+            GL.Uniform1(Shader.GetUniformLocation(context, shaderProgram, "lightmapTexture"), 3);
+            GL.ActiveTexture(TextureUnit.Texture0);
+
+            // world (x,y,z) → GL (-y, z, -x); dot products are preserved under this
+            // permutation, so converting the axis vector is all that's needed.
+            GL.Uniform4(Shader.GetUniformLocation(context, shaderProgram, "uLightmapMapU"),
+                -LightmapAxisU.Y, LightmapAxisU.Z, -LightmapAxisU.X, LightmapOffsetU);
+            GL.Uniform4(Shader.GetUniformLocation(context, shaderProgram, "uLightmapMapV"),
+                -LightmapAxisV.Y, LightmapAxisV.Z, -LightmapAxisV.X, LightmapOffsetV);
+            GL.Uniform2(Shader.GetUniformLocation(context, shaderProgram, "uLightmapInvSize"),
+                1.0f / LightmapWidth, 1.0f / LightmapHeight);
+
+            GL.Uniform1(Shader.GetUniformLocation(context, shaderProgram, "uUseLightmap"), 1);
+        }
+
         /// <summary>
         /// The vertices of the polygon.
         /// </summary>
@@ -129,6 +193,12 @@ namespace CSharp3D.Forms.Meshes
         /// Get the index array of the polygon.
         /// </summary>
         /// <returns> The index array of the polygon. </returns>
+        /// <summary>Triangle fan over the winding — the count needs no array.</summary>
+        public override int GetIndexCount()
+        {
+            return Vertices != null && Vertices.Length >= 3 ? 3 * (Vertices.Length - 2) : 0;
+        }
+
         public override uint[] GetIndexArray()
         {
             // Cuboid indices

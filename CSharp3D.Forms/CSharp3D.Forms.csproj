@@ -107,6 +107,7 @@
     </Compile>
     <Compile Include="Controls\QuadViewSet.cs" />
     <Compile Include="Engine\AABB.cs" />
+    <Compile Include="Engine\LightmapTexture.cs" />
     <Compile Include="Engine\Location.cs" />
     <Compile Include="Engine\LocationVector.cs" />
     <Compile Include="Engine\Material.cs">
@@ -119,6 +120,7 @@
       <SubType>Component</SubType>
     </Compile>
     <Compile Include="Engine\UV.cs" />
+    <Compile Include="Engine\ViewFrustum.cs" />
     <Compile Include="Engine\Vertex.cs" />
     <Compile Include="Exceptions\CameraNotSetException.cs" />
     <Compile Include="Lights\PointLight.cs">

@@ -5,6 +5,7 @@ using CSharp3D.Forms.Lights;
 using CSharp3D.Forms.Meshes;
 using CSharp3D.Forms.Utils;
 using OpenTK;
+using OpenTK.Graphics.OpenGL;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -35,6 +36,19 @@ namespace CSharp3D.Forms.Engine
         public string ShaderDirectory { get; set; } = "";
 
         /// <summary>
+        /// Draw textured geometry at full brightness, ignoring the scene's lights and
+        /// ambient term.
+        ///
+        /// For editor viewports, where the texture itself is the information and dynamic
+        /// lighting only darkens it — Hammer's textured 3D view works this way. Baked
+        /// lightmaps are unaffected: they replace the lighting entirely and still win, so
+        /// a lighting preview keeps showing real light with this set.
+        /// </summary>
+        [Category("Scene")]
+        [Description("Draw textured geometry at full brightness, ignoring scene lights and ambient. Baked lightmaps still apply.")]
+        public bool FullBright { get; set; } = false;
+
+        /// <summary>
         /// The constant color of the ambient light.
         /// </summary>
         [Category("Scene")]
@@ -59,6 +73,86 @@ namespace CSharp3D.Forms.Engine
         public List<Mesh> Meshes = new List<Mesh>();
 
         private Dictionary<string, Shader> Shaders = new Dictionary<string, Shader>();
+
+        // ==================== deferred GPU resource release ====================
+
+        /// <summary>
+        /// GL object ids belonging to meshes that have been dropped from the scene,
+        /// queued per context until that context is current and can delete them.
+        ///
+        /// A GL delete only acts on the context current on the calling thread, so a
+        /// scene rebuild cannot simply call <see cref="Mesh.Dispose(object)"/> against
+        /// four view contexts — it would free ids belonging to whichever one happens to
+        /// be live. The previous answer to that was to not free anything at all, which
+        /// leaks every buffer of every rebuild: on a large map one selection change
+        /// orphans tens of thousands of VAOs and buffers per context, and after a few
+        /// clicks the driver is managing millions of them and <c>glBufferData</c> grinds
+        /// to a halt. Queuing per context and flushing during that context's own paint
+        /// is the correct middle ground.
+        /// </summary>
+        private readonly Dictionary<object, List<int>> _pendingVaoDeletes = new Dictionary<object, List<int>>();
+
+        private readonly Dictionary<object, List<int>> _pendingBufferDeletes = new Dictionary<object, List<int>>();
+
+        /// <summary>
+        /// Hand a dropped mesh's GPU resources over for deletion. The mesh is left with
+        /// no buffers, so if it is ever drawn again it simply re-uploads.
+        /// Call on the UI thread, like the rest of scene mutation.
+        /// </summary>
+        public void ScheduleDispose(Mesh mesh)
+        {
+            if (mesh == null)
+                return;
+
+            Queue(_pendingVaoDeletes, mesh.vao);
+            Queue(_pendingBufferDeletes, mesh.vbo);
+            Queue(_pendingBufferDeletes, mesh.ebo);
+
+            mesh.ForgetGpuResources();
+        }
+
+        private static void Queue(Dictionary<object, List<int>> target, Dictionary<object, int> ids)
+        {
+            foreach (KeyValuePair<object, int> entry in ids)
+            {
+                if (entry.Value == 0)
+                    continue;
+
+                List<int> list;
+                if (!target.TryGetValue(entry.Key, out list))
+                {
+                    list = new List<int>();
+                    target[entry.Key] = list;
+                }
+
+                list.Add(entry.Value);
+            }
+        }
+
+        /// <summary>
+        /// Delete everything queued for this context. MUST be called with
+        /// <paramref name="context"/> current — i.e. from that view's paint.
+        /// </summary>
+        public void ProcessPendingDeletions(object context)
+        {
+            List<int> vaos;
+            if (_pendingVaoDeletes.TryGetValue(context, out vaos) && vaos.Count > 0)
+            {
+                foreach (int id in vaos)
+                    GL.DeleteVertexArray(id);
+
+                vaos.Clear();
+            }
+
+            List<int> buffers;
+            if (_pendingBufferDeletes.TryGetValue(context, out buffers) && buffers.Count > 0)
+            {
+                foreach (int id in buffers)
+                    GL.DeleteBuffer(id);
+
+                buffers.Clear();
+            }
+        }
 
         /// <summary>
         /// Disposes of all the shaders and meshes in the scene.

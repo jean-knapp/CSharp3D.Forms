@@ -9,6 +9,7 @@ layout(location = 2) in vec2 inTexCoord;    // Texture coordinates of the vertex
 out vec2 geomTexCoord;     // Pass the texture coordinates to the geometry shader
 out vec3 geomNormal;       // Pass the normal vector to the geometry shader for lighting calculations
 out vec3 geomPosition;     // Pass the transformed vertex position to the geometry shader
+out vec3 geomWorldPosition; // World-space position, never rewritten into tangent space
 out mat4 geomModel;
 
 // Light positions are passed as uniforms to geometry shader, not per-vertex
@@ -26,6 +27,7 @@ void main()
 {
     // Compute the transformed position in world space
     geomPosition = vec3(uModel * vec4(inPosition, 1.0));
+    geomWorldPosition = geomPosition;
 
     // Pass the texture coordinates and normal vector to the fragment shader
     geomNormal = inNormal;   
