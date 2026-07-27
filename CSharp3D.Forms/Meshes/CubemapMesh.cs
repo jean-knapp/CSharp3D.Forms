@@ -127,6 +127,10 @@ namespace CSharp3D.Forms.Meshes
                 new CSharp3D.Forms.Engine.Vertex(-1020, 1024, 1024, 1, 0),
                 new CSharp3D.Forms.Engine.Vertex(-1020, -1024, 1024, 0, 0),
             };
+            // These four walls form a continuous ring: each one's u=1 edge meets the next
+            // one's u=0 edge, and panning right runs rt → ft → lf → bk, the order Source
+            // uses (engine/gl_warp.cpp) and the order the Skybox editor's face cross draws.
+            // Don't "fix" the +Y wall to be the viewer's right — it is deliberately rt.
             rightMesh.Vertices = new CSharp3D.Forms.Engine.Vertex[]
             {
                 new CSharp3D.Forms.Engine.Vertex(-1024, 1020, -1024, 0, 1),
