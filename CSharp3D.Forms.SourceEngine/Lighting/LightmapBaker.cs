@@ -85,16 +85,34 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         public int PublishIntervalMs = 40;
 
         /// <summary>
-        /// The whole-map bounce solve only starts after the scene has been quiet this
-        /// long, so a drag doesn't waste time starting gathers it will abort.
+        /// The bounce solve only starts after the scene has been quiet this long, so a
+        /// drag doesn't waste time starting gathers it will abort.
         /// </summary>
         public int BounceQuietMs = 400;
 
         /// <summary>
-        /// Quiet time before the settle sweep (full-map final-quality revalidation that
-        /// corrects anything the incremental requeue heuristics missed).
+        /// Quiet time before the REGIONAL settle sweep: a final-quality recompute of the
+        /// faces around everything that changed since the last sweep, correcting whatever
+        /// the incremental requeue heuristics missed near the edit.
         /// </summary>
         public int SweepQuietMs = 1500;
+
+        /// <summary>
+        /// Quiet time before the FULL revalidation — every face at final quality plus an
+        /// authoritative whole-map bounce solve. This is the "full compile in the
+        /// background": it runs once per burst of editing, on the worker threads, and
+        /// because recomputes are deterministic and byte-identical publishes are dropped,
+        /// the only thing it ever changes on screen is a face the cheap paths got wrong.
+        /// </summary>
+        public int FullSweepQuietMs = 4000;
+
+        /// <summary>
+        /// How far beyond the changed region a regional pass reaches, in world units (or
+        /// 2× the region's own size, whichever is larger). Indirect light and
+        /// sampling-granularity shadow errors are local; anything further is left to the
+        /// full revalidation.
+        /// </summary>
+        public float RegionPad = 512.0f;
 
         // ---- state (all guarded by _gate unless noted) ----
 
@@ -114,9 +132,46 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         private bool _surfaceLightsDirty;
 
         private RayBvh _bvh;
+
+        /// <summary>
+        /// The live BVH no longer matches the geometry and a rebuild is owed. The old one
+        /// is deliberately KEPT while that happens: a rebuild over a whole map can easily
+        /// outlast the editor's update throttle, and dropping the BVH for its duration
+        /// meant that during a drag the baker spent every slice rebuilding and never
+        /// baked anything at all — the "it's working in the background but nothing
+        /// appears" symptom. Baking against a one-edit-stale BVH costs a slightly wrong
+        /// shadow for a fraction of a second; the regional sweep trues it up.
+        /// </summary>
+        private bool _bvhStale;
+
+        /// <summary>
+        /// Bumped whenever the face list's identity or order changes. Ray hits carry the
+        /// face's list INDEX, so a BVH may only outlive a scene update that left those
+        /// indices meaning the same faces — true for a move (same faces, new positions),
+        /// false when brushes are created or deleted, where the old BVH is dropped.
+        /// </summary>
+        private int _topology;
+
+        private int _bvhTopology = -1;
+
         private int _generation;         // bumped by any scene/light change → abort in-flight work
         private bool _bounceDirty;
         private bool _bounceRunning;
+
+        /// <summary>
+        /// The bounce needs re-solving over the whole map rather than just
+        /// <see cref="_bounceMin"/>..<see cref="_bounceMax"/> — set on a full scene load,
+        /// by a change to a global light (sun/sky), and once per edit burst by the full
+        /// revalidation stage.
+        /// </summary>
+        private bool _bounceAll;
+
+        private Vector3 _bounceMin = new Vector3(float.MaxValue);
+        private Vector3 _bounceMax = new Vector3(float.MinValue);
+
+        /// <summary>Union of everything that changed since the last regional sweep.</summary>
+        private Vector3 _dirtyMin = new Vector3(float.MaxValue);
+        private Vector3 _dirtyMax = new Vector3(float.MinValue);
 
         /// <summary>
         /// Whether the fast first bounce has already run for the current edit, i.e. the
@@ -136,9 +191,19 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
         private bool _sweepRunning;
         private bool _sweepPending;
+
+        /// <summary>Whole-map revalidation owed (see <see cref="FullSweepQuietMs"/>).</summary>
+        private bool _fullPending;
+
         private int _lastChangeTicks;
         private int _version;
 
+        /// <summary>
+        /// Per level: faces waiting to be baked. Drained from the BACK, so the most
+        /// recently enqueued face bakes first — an edit's own faces are enqueued last and
+        /// therefore light up immediately, ahead of the wider revalidation behind them.
+        /// (Popping from the front was also quadratic on a whole-map queue.)
+        /// </summary>
         private readonly List<BakeFace>[] _queues = { new List<BakeFace>(), new List<BakeFace>(), new List<BakeFace>() };
         private readonly HashSet<BakeFace>[] _queued =
             { new HashSet<BakeFace>(), new HashSet<BakeFace>(), new HashSet<BakeFace>() };
@@ -188,7 +253,9 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 lock (_gate)
                 {
                     return _queues[0].Count + _queues[1].Count + _queues[2].Count == 0
-                        && !_bounceDirty && !_bounceRunning && !_sweepPending && !_sweepRunning;
+                        && !_bounceDirty && !_bounceRunning
+                        && !_sweepPending && !_sweepRunning && !_fullPending
+                        && !_bvhStale && !_surfaceLightsDirty;
                 }
             }
         }
@@ -238,10 +305,14 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 _surfaceLightsDirty = true;
                 CombineLights();
                 _bvh = null;
+                _bvhStale = true;
                 _generation++;
                 _bounceDirty = BounceIterations > 0;
+                _bounceAll = true;
                 _bounceCoarseDone = false;
                 _sweepPending = false;
+                _fullPending = false;
+                ClearRegion(ref _dirtyMin, ref _dirtyMax);
 
                 for (int level = 0; level < Levels; level++)
                 {
@@ -285,19 +356,33 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 _entityLights = lights ?? new List<SourceLight>();
                 _surfaceLightsDirty = true;       // emitter patches move with the geometry
                 CombineLights();
-                _bvh = null;                      // geometry changed → worker rebuilds
+
+                // Only drop the BVH outright when the face list changed shape, which
+                // invalidates the triangle ids it hands back. A move keeps the old one
+                // live so baking continues while the replacement is built.
+                if (_topology != _bvhTopology)
+                    _bvh = null;
+
+                _bvhStale = true;
                 _generation++;
                 _bounceDirty |= BounceIterations > 0;
                 _bounceCoarseDone = false;
                 _sweepPending = true;
+                _fullPending = true;
+
+                ExtendRegion(ref _dirtyMin, ref _dirtyMax, dirtyMin, dirtyMax);
+                ExtendRegion(ref _bounceMin, ref _bounceMax, dirtyMin, dirtyMax);
+
+                // Shadow receivers first, the faces that actually changed last: the queue
+                // drains from the back, so the geometry under the cursor relights before
+                // the wider requeue behind it.
+                RequeueShadowReceivers(dirtyMin, dirtyMax, changed);
 
                 for (int i = 0; i < _faces.Count; i++)
                 {
                     if (changed != null && i < changed.Length && changed[i] && _faces[i].WantsLightmap)
-                        EnqueueForRelight(_faces[i]);
+                        EnqueueForRelight(_faces[i], urgent: true);
                 }
-
-                RequeueShadowReceivers(dirtyMin, dirtyMax, changed);
 
                 ResetJobCounters();
                 Touch();
@@ -343,6 +428,8 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 _generation++;
                 _bounceDirty |= BounceIterations > 0;
                 _bounceCoarseDone = false;
+                _sweepPending = true;
+                _fullPending = true;
 
                 bool global = false;
                 foreach (SourceLight light in changed)
@@ -352,7 +439,23 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                         global = true;
                         break;
                     }
+
+                    // A moved/retuned local light re-bounces (and gets revalidated) only
+                    // inside its own reach.
+                    float radius = light.CullRadius();
+                    if (radius >= float.MaxValue)
+                    {
+                        global = true;
+                        break;
+                    }
+
+                    Vector3 r = new Vector3(radius);
+                    ExtendRegion(ref _dirtyMin, ref _dirtyMax, light.Origin - r, light.Origin + r);
+                    ExtendRegion(ref _bounceMin, ref _bounceMax, light.Origin - r, light.Origin + r);
                 }
+
+                if (global)
+                    _bounceAll = true;
 
                 foreach (BakeFace face in _faces)
                 {
@@ -373,8 +476,11 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                         }
                     }
 
+                    // Priority only means something when the affected set is small; a
+                    // sun change affects everything, and appending the whole map again
+                    // per edit would just grow the queue.
                     if (affected)
-                        EnqueueForRelight(face);
+                        EnqueueForRelight(face, urgent: !global);
                 }
 
                 ResetJobCounters();
@@ -427,6 +533,18 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             {
                 BakeFace face = faces[f];
 
+                // Emitters depend only on the face, so they are cached on it. A geometry
+                // edit replaces just the BakeFace objects that changed, which is what
+                // keeps this from re-deriving every lit panel in the map (a patch-grid
+                // build each) on every mouse step of a drag.
+                if (face.SurfaceEmitters != null)
+                {
+                    lights.AddRange(face.SurfaceEmitters);
+                    continue;
+                }
+
+                face.SurfaceEmitters = EmptyLights;
+
                 if (face.Winding == null || face.Winding.Length < 3 || face.IsSky)
                     continue;
 
@@ -439,6 +557,9 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 float faceArea = PolygonArea(face.Winding);
                 if (faceArea <= 1e-6f)
                     continue;
+
+                List<SourceLight> emitters = new List<SourceLight>();
+                face.SurfaceEmitters = emitters;
 
                 float baseArea = Math.Max(1e-6f, face.TextureWidth * face.TextureHeight);
                 float texelsPerUnitU = 1.0f / Math.Max(1e-6f, face.TextureScaleU);
@@ -487,7 +608,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
                 for (int i = 0; i < origins.Count; i++)
                 {
-                    lights.Add(new SourceLight
+                    emitters.Add(new SourceLight
                     {
                         Type = SourceLightType.Surface,
                         Origin = origins[i],
@@ -510,7 +631,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
                 if (cluster)
                 {
-                    lights.Add(new SourceLight
+                    emitters.Add(new SourceLight
                     {
                         Type = SourceLightType.Surface,
                         Origin = centre,
@@ -528,10 +649,14 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                         SourceKey = face.Key,
                     });
                 }
+
+                lights.AddRange(emitters);
             }
 
             return lights;
         }
+
+        private static readonly List<SourceLight> EmptyLights = new List<SourceLight>();
 
         /// <summary>Area of a planar polygon (vrad WindingArea).</summary>
         private static float PolygonArea(Vector3[] winding)
@@ -548,6 +673,22 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         {
             List<BakeFace> next = faces ?? new List<BakeFace>();
 
+            // Did index i keep meaning the same face? That, not object identity, is what
+            // decides whether a BVH built against the old list is still usable — its hits
+            // report list indices. A modified face is a new object at the same index with
+            // the same Id, and leaves the BVH's ids perfectly valid (only stale in
+            // position); an inserted or deleted brush shifts everything after it.
+            bool sameTopology = _faces.Count == next.Count;
+
+            for (int i = 0; sameTopology && i < next.Count; i++)
+            {
+                if (_faces[i].Identity != next[i].Identity)
+                    sameTopology = false;
+            }
+
+            if (!sameTopology)
+                _topology++;
+
             // Faces no longer in the scene: mark so their queue entries get dropped.
             HashSet<BakeFace> keep = new HashSet<BakeFace>(next);
             foreach (BakeFace old in _faces)
@@ -562,6 +703,38 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 _faces[i].Index = i;
         }
 
+        // ---- dirty-region bookkeeping ----
+
+        private static void ClearRegion(ref Vector3 min, ref Vector3 max)
+        {
+            min = new Vector3(float.MaxValue);
+            max = new Vector3(float.MinValue);
+        }
+
+        private static void ExtendRegion(ref Vector3 min, ref Vector3 max, Vector3 otherMin, Vector3 otherMax)
+        {
+            if (otherMin.X > otherMax.X)
+                return; // empty
+
+            min = Vector3.Min(min, otherMin);
+            max = Vector3.Max(max, otherMax);
+        }
+
+        private static bool RegionIsEmpty(Vector3 min, Vector3 max)
+        {
+            return min.X > max.X;
+        }
+
+        /// <summary>The region grown by <see cref="RegionPad"/> (or 2× its own size).</summary>
+        private void PaddedRegion(Vector3 min, Vector3 max, out Vector3 outMin, out Vector3 outMax)
+        {
+            Vector3 size = max - min;
+            float pad = Math.Max(RegionPad, 2.0f * Math.Max(size.X, Math.Max(size.Y, size.Z)));
+
+            outMin = min - new Vector3(pad);
+            outMax = max + new Vector3(pad);
+        }
+
         /// <summary>
         /// Queue a face for relighting. A face already showing a result skips the coarse
         /// level: replacing a displayed full-resolution lightmap with a ×4-coarse one
@@ -569,28 +742,37 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// the stale-but-sharp image is the better bridge. Fresh faces (nothing on
         /// screen) still take the coarse level for fast first paint.
         /// </summary>
-        private void EnqueueForRelight(BakeFace face)
+        private void EnqueueForRelight(BakeFace face, bool urgent = false)
         {
             if (face.Result != null)
             {
                 if (face.BakedLevel > 0)
                     face.BakedLevel = 0;
 
-                Enqueue(1, face);
-                Enqueue(2, face);
+                Enqueue(1, face, urgent);
+                Enqueue(2, face, urgent);
             }
             else
             {
                 face.BakedLevel = -1;
-                Enqueue(0, face);
-                Enqueue(1, face);
-                Enqueue(2, face);
+                Enqueue(0, face, urgent);
+                Enqueue(1, face, urgent);
+                Enqueue(2, face, urgent);
             }
         }
 
-        private void Enqueue(int level, BakeFace face)
+        /// <summary>
+        /// Queue a face. <paramref name="urgent"/> appends unconditionally, even when the
+        /// face is already waiting further back: queues drain from the back, so this is
+        /// how the geometry being edited gets in front of the revalidation the previous
+        /// mouse step queued behind it. The duplicate entry left behind costs nothing —
+        /// the drain drops any entry whose face is already baked to that level.
+        /// </summary>
+        private void Enqueue(int level, BakeFace face, bool urgent = false)
         {
-            if (_queued[level].Add(face))
+            bool added = _queued[level].Add(face);
+
+            if (added || urgent)
                 _queues[level].Add(face);
         }
 
@@ -869,10 +1051,40 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
         // ==================== worker ====================
 
+        /// <summary>
+        /// Run on the worker thread as it starts, before any bake. This is where a GPU
+        /// tracer makes its GL context current: a context belongs to one thread at a time,
+        /// so it can only be acquired from inside the thread that will dispatch on it.
+        /// </summary>
+        public Action WorkerStarted;
+
+        /// <summary>
+        /// Run on the worker thread as it exits. GL objects belong to the context that made
+        /// them and can only be deleted with it current, so this is the only place a
+        /// tracer's buffers can be released without leaking them.
+        /// </summary>
+        public Action WorkerStopping;
+
         private void WorkerLoop()
         {
             long lastPublish = 0;
             bool published = false;
+
+            // A GPU tracer that cannot start is not fatal — the oracle factory simply keeps
+            // answering null and every face traces on the CPU, which is what it did before.
+            try
+            {
+                Action started = WorkerStarted;
+
+                if (started != null)
+                    started();
+            }
+            catch (Exception)
+            {
+            }
+
+            try
+            {
 
             while (_running)
             {
@@ -883,15 +1095,19 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 List<BakeFace> faces;
                 bool runBounce = false;
                 int bounceRays = BounceRaysPerPatch;
+                bool bounceAll = true;
+                Vector3 bounceMin = Vector3.Zero, bounceMax = Vector3.Zero;
 
                 bool needBvh, needSurfaceLights;
+                int topology;
 
                 lock (_gate)
                 {
                     generation = _generation;
+                    topology = _topology;
                     faces = _faces;
                     lights = _lights;
-                    needBvh = _bvh == null && _faces.Count > 0;
+                    needBvh = _bvhStale && _faces.Count > 0;
                     needSurfaceLights = _surfaceLightsDirty;
                     bvh = _bvh;
                 }
@@ -904,11 +1120,30 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
                     lock (_gate)
                     {
-                        if (generation == _generation)
+                        // Installable as long as list indices still mean the same faces;
+                        // the geometry may have moved on again since the build started, in
+                        // which case this is still strictly newer than what we hold, and
+                        // _bvhStale stays set so the next slice builds again. Discarding
+                        // it because a drag bumped the generation is what used to leave a
+                        // long drag with no usable BVH at all.
+                        if (topology == _topology)
+                        {
                             _bvh = built;
+                            _bvhTopology = topology;
+
+                            if (generation == _generation)
+                                _bvhStale = false;
+                        }
                     }
 
                     continue; // re-enter with fresh state
+                }
+
+                if (bvh == null)
+                {
+                    // Nothing to trace against yet (empty scene). Idle rather than spin.
+                    _wake.WaitOne(200);
+                    continue;
                 }
 
                 if (needSurfaceLights)
@@ -942,24 +1177,35 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                     // The real parallelism grain is ACROSS faces: most faces are far too
                     // small to split internally, so per-face threading alone leaves the
                     // other cores idle.
+                    // Drained from the BACK: the newest entries are the faces the user just
+                    // touched, and they must not queue behind the previous mouse step's
+                    // revalidation. (It is also O(1) per pop; popping the front made a
+                    // whole-map queue quadratic.)
+                    HashSet<BakeFace> inBatch = null;
+
                     for (int q = 0; q < Levels && batch == null; q++)
                     {
                         while (_queues[q].Count > 0)
                         {
-                            BakeFace candidate = _queues[q][0];
-                            _queues[q].RemoveAt(0);
+                            int last = _queues[q].Count - 1;
+                            BakeFace candidate = _queues[q][last];
+                            _queues[q].RemoveAt(last);
                             _queued[q].Remove(candidate);
 
-                            // Drop stale entries: removed faces and already-done levels.
-                            if (candidate.Index >= 0 && candidate.BakedLevel < q)
+                            // Drop stale entries: removed faces, already-done levels, and
+                            // the duplicates an urgent re-enqueue leaves behind.
+                            if (candidate.Index >= 0 && candidate.BakedLevel < q
+                                && (inBatch == null || !inBatch.Contains(candidate)))
                             {
                                 if (batch == null)
                                 {
                                     batch = new List<BakeFace>();
+                                    inBatch = new HashSet<BakeFace>();
                                     level = q;
                                 }
 
                                 batch.Add(candidate);
+                                inBatch.Add(candidate);
 
                                 if (batch.Count >= BatchSize)
                                     break;
@@ -994,41 +1240,99 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                         // full-quality re-solve once the scene is still.
                         bounceRays = _bounceCoarseDone ? BounceRaysPerPatch : BounceCoarseRaysPerPatch;
 
+                        // Regional unless something global moved: the union of what has
+                        // changed since the last solve, padded. The authoritative
+                        // whole-map solve comes with the full revalidation below.
+                        bounceAll = _bounceAll || RegionIsEmpty(_bounceMin, _bounceMax);
+                        bounceMin = _bounceMin;
+                        bounceMax = _bounceMax;
+
                         _bounceDirty = false;
+                        _bounceAll = false;
+                        ClearRegion(ref _bounceMin, ref _bounceMax);
                         _bounceRunning = true; // keeps IsConverged honest while gathering
                     }
 
-                    if (jobFace == null && !runBounce && !_bounceDirty && _sweepPending && QuietMs() >= SweepQuietMs)
+                    // Revalidation, in two stages. Both force a final-quality recompute;
+                    // values are deterministic and byte-identical results are not
+                    // republished, so a face the cheap paths judged correctly produces no
+                    // visible change and no GPU upload — only a real miss does.
+                    //
+                    //  - regional (SweepQuietMs): the neighbourhood of everything edited
+                    //    since the last sweep. Catches what the shadow-receiver heuristics
+                    //    miss, at a cost proportional to the edit rather than the map.
+                    //  - full (FullSweepQuietMs): every face, plus an authoritative
+                    //    whole-map bounce. This is the background "full compile" — it runs
+                    //    once per burst of editing, after the user has stopped.
+                    if (jobFace == null && !runBounce && !_bounceDirty
+                        && (_sweepPending || _fullPending))
                     {
-                        // Settle sweep: force a final-quality recompute of every face.
-                        // Values are deterministic, and byte-identical results are not
-                        // republished, so faces the incremental heuristics judged
-                        // correctly produce no visible change — only real misses do.
-                        _sweepPending = false;
+                        bool full = _fullPending && QuietMs() >= FullSweepQuietMs;
+                        bool regional = !full && _sweepPending && QuietMs() >= SweepQuietMs;
 
-                        foreach (BakeFace face in _faces)
+                        if (full || regional)
                         {
-                            if (!face.WantsLightmap)
+                            Vector3 sweepMin = Vector3.Zero, sweepMax = Vector3.Zero;
+
+                            if (regional)
+                                PaddedRegion(_dirtyMin, _dirtyMax, out sweepMin, out sweepMax);
+
+                            // A full sweep subsumes the regional one.
+                            _sweepPending = false;
+                            ClearRegion(ref _dirtyMin, ref _dirtyMax);
+
+                            if (full)
+                                _fullPending = false;
+
+                            int queued = 0;
+
+                            foreach (BakeFace face in _faces)
+                            {
+                                if (!face.WantsLightmap)
+                                    continue;
+
+                                if (regional)
+                                {
+                                    Vector3 fMin, fMax;
+                                    FaceBounds(face, out fMin, out fMax);
+
+                                    if (!BoxesTouch(fMin, fMax, sweepMin, sweepMax))
+                                        continue;
+                                }
+
+                                if (face.BakedLevel >= 2)
+                                    face.BakedLevel = 1;
+
+                                if (face.BakedLevel < 1 && face.Result == null)
+                                    Enqueue(0, face);
+                                if (face.BakedLevel < 1)
+                                    Enqueue(1, face);
+
+                                Enqueue(2, face);
+                                queued++;
+                            }
+
+                            // The full stage owes an authoritative whole-map bounce
+                            // regardless of what the sweep turns up; the regional stage
+                            // watches whether it actually corrected anything first (see
+                            // where _sweepRunning is cleared).
+                            if (full && BounceIterations > 0)
+                            {
+                                _bounceAll = true;
+                                _bounceDirty = true;
+                                _bounceCoarseDone = true;   // straight to full quality
+                            }
+
+                            Status = full ? "revalidating (full)" : "revalidating";
+
+                            if (queued > 0)
+                            {
+                                _sweepRunning = true;
+                                _publishMarkerAtSweep = Volatile.Read(ref _publishCount);
+                                ResetJobCounters();
                                 continue;
-
-                            if (face.BakedLevel >= 2)
-                                face.BakedLevel = 1;
-
-                            if (face.BakedLevel < 1 && face.Result == null)
-                                Enqueue(0, face);
-                            if (face.BakedLevel < 1)
-                                Enqueue(1, face);
-
-                            Enqueue(2, face);
+                            }
                         }
-
-                        // Don't pre-dirty the bounce: watch whether the sweep actually
-                        // republishes anything and decide when its jobs have drained.
-                        _sweepRunning = true;
-                        _publishMarkerAtSweep = Volatile.Read(ref _publishCount);
-
-                        ResetJobCounters();
-                        continue;
                     }
                 }
 
@@ -1074,10 +1378,13 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
                 if (runBounce)
                 {
-                    Status = _bounceCoarseDone ? "bounce (final)" : "bounce";
+                    Status = bounceAll
+                        ? (_bounceCoarseDone ? "bounce (full)" : "bounce")
+                        : "bounce (local)";
+
                     try
                     {
-                        RunBounce(faces, bvh, generation, bounceRays);
+                        RunBounce(faces, bvh, generation, bounceRays, bounceAll, bounceMin, bounceMax);
                     }
                     finally
                     {
@@ -1090,6 +1397,12 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                             {
                                 _bounceCoarseDone = true;
                                 _bounceDirty = true;
+
+                                // The refinement covers what this pass covered.
+                                if (bounceAll)
+                                    _bounceAll = true;
+                                else
+                                    ExtendRegion(ref _bounceMin, ref _bounceMax, bounceMin, bounceMax);
                             }
                         }
                     }
@@ -1106,6 +1419,21 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
                 Status = IsConverged ? "converged" : Status;
                 _wake.WaitOne(200);
+            }
+
+            }
+            finally
+            {
+                try
+                {
+                    Action stopping = WorkerStopping;
+
+                    if (stopping != null)
+                        stopping();
+                }
+                catch (Exception)
+                {
+                }
             }
         }
 
@@ -1147,6 +1475,33 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             return (dot + dot * dot) * 0.5f;
         }
 
+        /// <summary>
+        /// Supplies the oracle that answers visibility for a bake, or null to trace on the
+        /// CPU. Set by the host when a GPU tracer is available; left null the rest of the
+        /// time, which is what makes the CPU path the default rather than the fallback.
+        ///
+        /// Called once per face, from the worker thread. An implementation that cannot
+        /// serve a particular BVH — no context, a failed dispatch, a scene too large for
+        /// its buffers — returns null and gets the CPU path for that face, so a GPU that
+        /// gives up mid-bake degrades instead of stopping.
+        /// </summary>
+        public Func<RayBvh, IRayOracle> OracleFactory;
+
+        private IRayOracle ResolveOracle(RayBvh bvh)
+        {
+            Func<RayBvh, IRayOracle> factory = OracleFactory;
+
+            if (factory != null)
+            {
+                IRayOracle oracle = factory(bvh);
+
+                if (oracle != null)
+                    return oracle;
+            }
+
+            return new BvhRayOracle(bvh);
+        }
+
         private void BakeFaceDirect(BakeFace face, int level, RayBvh bvh,
                                     List<SourceLight> lights, int generation)
         {
@@ -1181,34 +1536,44 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                     relevant.Add(light);
             }
 
+            // Whoever answers the visibility questions for this face — the GPU tracer when
+            // one is running, else a plain per-ray BVH descent. The lighting below neither
+            // knows nor cares which, which is the point of the seam.
+            IRayOracle rays = ResolveOracle(bvh);
+
             if (bvh != null && relevant.Count > VisibilityCullThreshold)
-                relevant = CullInvisibleLights(relevant, grid, normal, faceIndex, bvh);
+                relevant = CullInvisibleLights(relevant, grid, normal, faceIndex, rays);
 
-            if (count >= ParallelThreshold)
+            GpuBatchOracle batch = rays as GpuBatchOracle;
+
+            if (batch != null)
             {
-                // Chunk rows so each task body is substantial — a fork/join per face
-                // with tiny tasks costs more than it wins.
-                int rowsPerChunk = Math.Max(1, (ParallelThreshold + grid.Width - 1) / grid.Width);
-                int chunks = (grid.Height + rowsPerChunk - 1) / rowsPerChunk;
+                // Record every ray the lighting wants, trace them in one dispatch, then run
+                // the lighting again to consume the answers. See GpuBatchOracle for why the
+                // two passes are guaranteed to ask for the same rays in the same order.
+                batch.BeginRecording();
+                BakeFaceLuxels(grid, normal, faceIndex, relevant, sunRays, skyDirs, aoRays, rays,
+                               direct, count, generation);
 
-                Parallel.For(0, chunks, ParallelOpts, (chunk, state) =>
+                if (Volatile.Read(ref _generation) != generation)
+                    return;
+
+                if (!batch.Resolve())
                 {
-                    if (Volatile.Read(ref _generation) != generation)
-                    {
-                        state.Stop();
-                        return;
-                    }
+                    // Too many rays for one batch, or the dispatch failed. Bake the face on
+                    // the CPU rather than dropping it — a GPU that gives up degrades.
+                    rays = new BvhRayOracle(bvh);
+                }
 
-                    int start = chunk * rowsPerChunk * grid.Width;
-                    int end = Math.Min(count, start + rowsPerChunk * grid.Width);
-                    BakeLuxelSpan(grid, normal, faceIndex, relevant, sunRays, skyDirs, aoRays, bvh,
-                                  direct, start, end, generation);
-                });
+                BakeFaceLuxels(grid, normal, faceIndex, relevant, sunRays, skyDirs, aoRays, rays,
+                               direct, count, generation);
+
+                batch.EndFace();
             }
             else
             {
-                BakeLuxelSpan(grid, normal, faceIndex, relevant, sunRays, skyDirs, aoRays, bvh,
-                              direct, 0, count, generation);
+                BakeFaceLuxels(grid, normal, faceIndex, relevant, sunRays, skyDirs, aoRays, rays,
+                               direct, count, generation);
             }
 
             // Never install data computed against a superseded scene.
@@ -1280,7 +1645,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// and bake every candidate.
         /// </summary>
         private static List<SourceLight> CullInvisibleLights(List<SourceLight> candidates, LuxelGrid grid,
-                                                             Vector3 normal, int faceIndex, RayBvh bvh)
+                                                             Vector3 normal, int faceIndex, IRayOracle rays)
         {
             int probeCount;
             int[] probes = ProbeIndices(grid, out probeCount);
@@ -1327,7 +1692,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                     if (light.Type == SourceLightType.Spot && dot2 <= light.StopDot2)
                         continue;                       // outside the cone
 
-                    if (!bvh.AnyHit(pos, L, dist - 0.5f, faceIndex))
+                    if (!rays.AnyHit(pos, L, dist - 0.5f, faceIndex, RayTriangleFlags.None))
                         anySees = true;
                 }
 
@@ -1366,11 +1731,49 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             return _probeBuffer;
         }
 
+        /// <summary>
+        /// Bake a face's luxels, in parallel row-chunks when the oracle allows it.
+        ///
+        /// A batched oracle does not: it carries a cursor, and the batch it dispatches is
+        /// already the parallelism. So the choice of how to spread the work follows from who
+        /// is answering the rays, which is why it lives here rather than in the caller.
+        /// </summary>
+        private void BakeFaceLuxels(LuxelGrid grid, Vector3 normal, int faceIndex,
+                                    List<SourceLight> relevant, int sunRays, Vector3[] skyDirs, int aoRays,
+                                    IRayOracle rays, Vector3[] direct, int count, int generation)
+        {
+            if (count < ParallelThreshold || !rays.SupportsConcurrentUse)
+            {
+                BakeLuxelSpan(grid, normal, faceIndex, relevant, sunRays, skyDirs, aoRays, rays,
+                              direct, 0, count, generation);
+                return;
+            }
+
+            // Chunk rows so each task body is substantial — a fork/join per face
+            // with tiny tasks costs more than it wins.
+            int rowsPerChunk = Math.Max(1, (ParallelThreshold + grid.Width - 1) / grid.Width);
+            int chunks = (grid.Height + rowsPerChunk - 1) / rowsPerChunk;
+
+            Parallel.For(0, chunks, ParallelOpts, (chunk, state) =>
+            {
+                if (Volatile.Read(ref _generation) != generation)
+                {
+                    state.Stop();
+                    return;
+                }
+
+                int start = chunk * rowsPerChunk * grid.Width;
+                int end = Math.Min(count, start + rowsPerChunk * grid.Width);
+                BakeLuxelSpan(grid, normal, faceIndex, relevant, sunRays, skyDirs, aoRays, rays,
+                              direct, start, end, generation);
+            });
+        }
+
         /// <summary>The direct-light kernel over a contiguous luxel range (plain loop —
         /// no per-luxel delegate; this is the hottest code in the baker).</summary>
         private void BakeLuxelSpan(LuxelGrid grid, Vector3 normal, int faceIndex,
                                    List<SourceLight> relevant, int sunRays, Vector3[] skyDirs, int aoRays,
-                                   RayBvh bvh,
+                                   IRayOracle rays,
                                    Vector3[] direct, int start, int end, int generation)
         {
             for (int i = start; i < end; i++)
@@ -1391,7 +1794,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 // the per-type switch (lightmap.cpp:2269), and every contribution is
                 // linear in that dot — so one factor over the whole sum is equivalent.
                 float ao = aoRays > 0
-                    ? ComputeAmbientOcclusion(pos, normal, bvh, aoRays, faceIndex)
+                    ? ComputeAmbientOcclusion(pos, normal, rays, aoRays, faceIndex)
                     : 1.0f;
 
                 for (int l = 0; l < relevant.Count; l++)
@@ -1402,19 +1805,19 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                     {
                         case SourceLightType.Point:
                         case SourceLightType.Spot:
-                            sum += SampleStandardLight(light, pos, normal, bvh, faceIndex);
+                            sum += SampleStandardLight(light, pos, normal, rays, faceIndex);
                             break;
 
                         case SourceLightType.Surface:
-                            sum += SampleSurfaceLight(light, pos, normal, bvh, faceIndex);
+                            sum += SampleSurfaceLight(light, pos, normal, rays, faceIndex);
                             break;
 
                         case SourceLightType.SkyLight:
-                            sum += SampleSkyLight(light, pos, normal, bvh, faceIndex, sunRays, i);
+                            sum += SampleSkyLight(light, pos, normal, rays, faceIndex, sunRays, i);
                             break;
 
                         case SourceLightType.SkyAmbient:
-                            sum += SampleSkyAmbient(light, pos, normal, bvh, faceIndex, skyDirs);
+                            sum += SampleSkyAmbient(light, pos, normal, rays, faceIndex, skyDirs);
                             break;
                     }
                 }
@@ -1431,10 +1834,10 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// every luxel, exactly as vrad's per-call DirectionalSampler_t restarts from the
         /// same sequence each time.
         /// </summary>
-        private static float ComputeAmbientOcclusion(Vector3 pos, Vector3 normal, RayBvh bvh,
+        private static float ComputeAmbientOcclusion(Vector3 pos, Vector3 normal, IRayOracle rays,
                                                      int nSamples, int skipFace)
         {
-            if (bvh == null || nSamples <= 0)
+            if (rays == null || nSamples <= 0)
                 return 1.0f;
 
             Vector3[] dirs = SphereDirections.Table(nSamples);
@@ -1451,7 +1854,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
                 totalPossible += absDot;
 
-                if (!bvh.AnyHit(pos, dir, AoRayLength, skipFace, RayTriangleFlags.Sky))
+                if (!rays.AnyHit(pos, dir, AoRayLength, skipFace, RayTriangleFlags.Sky))
                     totalVisible += absDot;
             }
 
@@ -1467,7 +1870,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// the exact falloff polynomial, cone handling, hard-falloff quintic fade and a
         /// shadow ray.
         /// </summary>
-        private Vector3 SampleStandardLight(SourceLight dl, Vector3 pos, Vector3 normal, RayBvh bvh, int skipFace)
+        private Vector3 SampleStandardLight(SourceLight dl, Vector3 pos, Vector3 normal, IRayOracle rays, int skipFace)
         {
             Vector3 delta = dl.Origin - pos;
             float dist2 = delta.LengthSquared();
@@ -1528,7 +1931,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             }
 
             // Shadow ray (vrad TestLine): anything opaque between sample and light kills it.
-            if (bvh != null && bvh.AnyHit(pos, L, dist - 0.5f, skipFace))
+            if (rays.AnyHit(pos, L, dist - 0.5f, skipFace, RayTriangleFlags.None))
                 return Vector3.Zero;
 
             return dl.Intensity * (falloff * dot);
@@ -1541,7 +1944,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// what makes a grid of these behave like the area light it stands for.
         /// No constant/linear/quadratic keys and no cap distance are involved.
         /// </summary>
-        private Vector3 SampleSurfaceLight(SourceLight dl, Vector3 pos, Vector3 normal, RayBvh bvh, int skipFace)
+        private Vector3 SampleSurfaceLight(SourceLight dl, Vector3 pos, Vector3 normal, IRayOracle rays, int skipFace)
         {
             Vector3 delta = dl.Origin - pos;
             float dist2 = delta.LengthSquared();
@@ -1567,7 +1970,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
             // vrad nudges the trace endpoint off the emitting surface by DIST_EPSILON so
             // the ray doesn't hit the emitter itself; stopping short does the same.
-            if (bvh != null && bvh.AnyHit(pos, L, dist - 0.5f, skipFace))
+            if (rays.AnyHit(pos, L, dist - 0.5f, skipFace, RayTriangleFlags.None))
                 return Vector3.Zero;
 
             return dl.Intensity * (falloff * dot);
@@ -1578,7 +1981,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// sun must reach a sky face (or leave the map). Soft sun jitters over the
         /// angular extent.
         /// </summary>
-        private Vector3 SampleSkyLight(SourceLight dl, Vector3 pos, Vector3 normal, RayBvh bvh, int skipFace,
+        private Vector3 SampleSkyLight(SourceLight dl, Vector3 pos, Vector3 normal, IRayOracle rays, int skipFace,
                                        int nsamples, int luxelSeed)
         {
             float dot = -Vector3.Dot(normal, dl.Normal);
@@ -1606,10 +2009,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                     dir = Vector3.Normalize(toSun + jitter);
                 }
 
-                RayHit hit;
-                if (!bvh.ClosestHit(pos, dir, MaxTrace, out hit))
-                    visible++; // left the map — treat as sky (leaked-map leniency)
-                else if ((hit.Flags & RayTriangleFlags.Sky) != 0)
+                if (rays.ReachesSky(pos, dir, MaxTrace))
                     visible++;
             }
 
@@ -1622,7 +2022,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// integral over a fixed direction table; result = intensity × Σ(vis·dot)/Σ(dot),
         /// so a fully open surface gets exactly the _ambient value.
         /// </summary>
-        private Vector3 SampleSkyAmbient(SourceLight dl, Vector3 pos, Vector3 normal, RayBvh bvh, int skipFace,
+        private Vector3 SampleSkyAmbient(SourceLight dl, Vector3 pos, Vector3 normal, IRayOracle rays, int skipFace,
                                          Vector3[] dirs)
         {
             const float MaxTrace = 1.0e6f;
@@ -1641,14 +2041,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 dot = SoftenCosine(dot);
                 sumDot += dot;
 
-                RayHit hit;
-                bool visible;
-                if (!bvh.ClosestHit(pos, dir, MaxTrace, out hit))
-                    visible = true;
-                else
-                    visible = (hit.Flags & RayTriangleFlags.Sky) != 0;
-
-                if (visible)
+                if (rays.ReachesSky(pos, dir, MaxTrace))
                     sumVisible += dot;
             }
 
@@ -1671,7 +2064,16 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// very end, complete: an aborted bounce leaves the previous bounce visible, and
         /// the display can never dip to direct-only between bounce runs.
         /// </summary>
-        private void RunBounce(List<BakeFace> faces, RayBvh bvh, int generation, int raysPerPatch)
+        /// <param name="all">
+        /// Solve every face. When false only faces inside <paramref name="regionMin"/>..
+        /// <paramref name="regionMax"/> (padded) are re-gathered; the rest keep the
+        /// indirect light they already have, but still light the region — their radiosity
+        /// is what the region's rays read. That is the local-first half of the design: an
+        /// edit's colour bleed appears at once, and the authoritative whole-map solve
+        /// follows in the background when the editor goes quiet.
+        /// </param>
+        private void RunBounce(List<BakeFace> faces, RayBvh bvh, int generation, int raysPerPatch,
+                               bool all, Vector3 regionMin, Vector3 regionMax)
         {
             if (bvh == null)
                 return;
@@ -1682,8 +2084,15 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             Vector3[][] emit = new Vector3[n][];
             Vector3[][] gathered = new Vector3[n][];
             Vector3[][] indirect = new Vector3[n][];
+            bool[] solve = new bool[n];
 
-            // 1. Patch grids seeded with direct light averaged from luxels.
+            Vector3 padMin = Vector3.Zero, padMax = Vector3.Zero;
+            if (!all)
+                PaddedRegion(regionMin, regionMax, out padMin, out padMax);
+
+            // 1. Patch grids seeded with direct light averaged from luxels. The lattice
+            //    depends only on the face, so it is cached — rebuilding one per face per
+            //    solve was most of the cost of a re-bounce on a large map.
             for (int f = 0; f < n; f++)
             {
                 BakeFace face = faces[f];
@@ -1691,8 +2100,14 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 if (!face.WantsLightmap || face.Grid == null || face.Direct == null)
                     continue;
 
-                float patchSize = Math.Max(1, face.LightmapScale) * PatchCoarsen;
-                LuxelGrid patches = LuxelGrid.Build(face.Winding, face.Normal, face.AxisU, face.AxisV, patchSize);
+                LuxelGrid patches = face.PatchGridCache;
+
+                if (patches == null)
+                {
+                    float patchSize = Math.Max(1, face.LightmapScale) * PatchCoarsen;
+                    patches = LuxelGrid.Build(face.Winding, face.Normal, face.AxisU, face.AxisV, patchSize);
+                    face.PatchGridCache = patches;
+                }
 
                 if (patches == null)
                     continue;
@@ -1700,8 +2115,23 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 int pcount = patches.Width * patches.Height;
                 grids[f] = patches;
                 emit[f] = new Vector3[pcount];
-                gathered[f] = new Vector3[pcount];
-                indirect[f] = new Vector3[pcount];
+
+                if (all)
+                {
+                    solve[f] = true;
+                }
+                else
+                {
+                    Vector3 fMin, fMax;
+                    FaceBounds(face, out fMin, out fMax);
+                    solve[f] = BoxesTouch(fMin, fMax, padMin, padMax);
+                }
+
+                if (solve[f])
+                {
+                    gathered[f] = new Vector3[pcount];
+                    indirect[f] = new Vector3[pcount];
+                }
 
                 for (int p = 0; p < pcount; p++)
                 {
@@ -1721,7 +2151,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
                 Parallel.For(0, n, ParallelOpts, (f, state) =>
                 {
-                    if (grids[f] == null)
+                    if (grids[f] == null || !solve[f])
                         return;
 
                     if (Volatile.Read(ref _generation) != generation)
@@ -1744,6 +2174,26 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                         continue;
 
                     Vector3 reflectivity = faces[f].Reflectivity;
+
+                    if (!solve[f])
+                    {
+                        // Outside the region: this face is not re-gathering, but the next
+                        // iteration's rays still have to see it re-emit. Its total indirect
+                        // from the last full solve is exactly the radiosity a full solve
+                        // would have it emitting, so use that and hold it fixed.
+                        PatchLighting held = faces[f].Bounce;
+                        int held_count = emit[f].Length;
+
+                        for (int p = 0; p < held_count; p++)
+                        {
+                            emit[f][p] = held != null && held.Grid != null
+                                ? SampleGrid(held.Grid, held.Indirect, grids[f].Positions[p]) * reflectivity
+                                : Vector3.Zero;
+                        }
+
+                        continue;
+                    }
+
                     int pcount = indirect[f].Length;
 
                     for (int p = 0; p < pcount; p++)
@@ -1759,19 +2209,30 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
             // 3. Install + republish, atomically per face. Publishing skips faces whose
             //    bytes didn't change, so a bounce refresh over a static scene is silent.
+            long lastPublish = Environment.TickCount;
+
             for (int f = 0; f < n; f++)
             {
-                if (grids[f] == null)
+                if (grids[f] == null || !solve[f])
                     continue;
 
                 BakeFace face = faces[f];
-                face.PatchGrid = grids[f];
+
                 Vector3[] smoothed = indirect[f];
                 for (int pass = 0; pass < BounceSmoothPasses; pass++)
                     smoothed = SmoothPatches(smoothed, grids[f].Width, grids[f].Height);
 
-                face.PatchIndirect = smoothed;
+                face.Bounce = new PatchLighting(grids[f], smoothed);
                 Publish(face, face.BakedLevel);
+
+                // A whole-map solve can take a while to walk; let the view see the faces
+                // that are already done instead of waiting for the last one.
+                long now = Environment.TickCount;
+                if (now - lastPublish >= PublishIntervalMs)
+                {
+                    lastPublish = now;
+                    RaiseResults();
+                }
             }
         }
 
@@ -1898,8 +2359,8 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// Compose direct + patch-sampled indirect into the encoded texture snapshot.
         /// Indirect lives in world-anchored patch space, so it composes correctly with a
         /// direct grid of ANY pass level (a luxel-array indirect indexed into a
-        /// different-sized grid was a flicker bug). Encoding: linear LDR units / 4×
-        /// overbright range, sqrt-encoded; the shader decodes with (texel² · 4).
+        /// different-sized grid was a flicker bug). Encoding is the engine's own
+        /// (<see cref="SourceColorSpace.EncodeLuxel"/>); the shader applies ×OVERBRIGHT.
         ///
         /// A publish that produces byte-identical content to what the face already shows
         /// is dropped entirely — deterministic recomputes (settle sweep, bounce refresh)
@@ -1913,8 +2374,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             if (grid == null || direct == null)
                 return;
 
-            LuxelGrid patchGrid = face.PatchGrid;
-            Vector3[] patchIndirect = face.PatchIndirect;
+            PatchLighting bounce = face.Bounce;
 
             int count = grid.Width * grid.Height;
             byte[] rgb = new byte[count * 3];
@@ -1923,8 +2383,8 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             {
                 Vector3 v = direct[i];
 
-                if (patchGrid != null && patchIndirect != null)
-                    v += SampleGrid(patchGrid, patchIndirect, grid.Positions[i]);
+                if (bounce != null && bounce.Grid != null)
+                    v += SampleGrid(bounce.Grid, bounce.Indirect, grid.Positions[i]);
 
                 rgb[i * 3 + 0] = Encode(v.X);
                 rgb[i * 3 + 1] = Encode(v.Y);

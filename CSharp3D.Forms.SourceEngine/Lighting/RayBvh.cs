@@ -204,6 +204,83 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             }
         }
 
+        // ==================== GPU upload ====================
+
+        /// <summary>
+        /// The nodes in the vec4 pair the compute shader declares: xyz is the bound, w
+        /// carries the int through its bit pattern. Packed here rather than in the tracer
+        /// so the layout lives next to the traversal it has to agree with — the shader
+        /// walks this exact tree, and a mismatch is a silently wrong shadow, not a crash.
+        /// </summary>
+        public float[] PackNodesForGpu()
+        {
+            if (_nodes == null)
+                return null;
+
+            float[] data = new float[_nodes.Length * 8];
+
+            for (int i = 0; i < _nodes.Length; i++)
+            {
+                int at = i * 8;
+                Node node = _nodes[i];
+
+                data[at + 0] = node.Min.X;
+                data[at + 1] = node.Min.Y;
+                data[at + 2] = node.Min.Z;
+                data[at + 3] = IntAsFloat(node.LeftOrStart);
+                data[at + 4] = node.Max.X;
+                data[at + 5] = node.Max.Y;
+                data[at + 6] = node.Max.Z;
+                data[at + 7] = IntAsFloat(node.Count);
+            }
+
+            return data;
+        }
+
+        /// <summary>
+        /// The triangles as three vec4s each: the vertices, with the id and flags riding
+        /// in the unused w lanes. Already in leaf order — Build permutes them — so a leaf's
+        /// range indexes straight into this.
+        /// </summary>
+        public float[] PackTrianglesForGpu()
+        {
+            if (_tris == null)
+                return null;
+
+            float[] data = new float[_tris.Length * 12];
+
+            for (int i = 0; i < _tris.Length; i++)
+            {
+                int at = i * 12;
+                RayTriangle tri = _tris[i];
+
+                data[at + 0] = tri.V0.X;
+                data[at + 1] = tri.V0.Y;
+                data[at + 2] = tri.V0.Z;
+                data[at + 3] = IntAsFloat(tri.Id);
+                data[at + 4] = tri.V1.X;
+                data[at + 5] = tri.V1.Y;
+                data[at + 6] = tri.V1.Z;
+                data[at + 7] = IntAsFloat((int)tri.Flags);
+                data[at + 8] = tri.V2.X;
+                data[at + 9] = tri.V2.Y;
+                data[at + 10] = tri.V2.Z;
+                data[at + 11] = 0f;
+            }
+
+            return data;
+        }
+
+        /// <summary>
+        /// An int's bit pattern as a float, for the w lanes above — the shader reads it
+        /// back with floatBitsToInt. BitConverter rather than an unsafe cast so the
+        /// assembly stays verifiable; this runs once per BVH build, not per ray.
+        /// </summary>
+        private static float IntAsFloat(int value)
+        {
+            return BitConverter.ToSingle(BitConverter.GetBytes(value), 0);
+        }
+
         // ==================== traversal ====================
 
         [ThreadStatic]

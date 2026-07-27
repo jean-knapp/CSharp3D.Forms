@@ -1,4 +1,4 @@
-#version 330 core
+﻿#version 330 core
 
 #define MAX_LIGHTS 8  // Change this value to support more/fewer lights (must match C# MAX_LIGHTS)
 
@@ -10,6 +10,7 @@ in vec3 fragPosition;    // Input vertex position from the vertex shader
 in vec3 fragWorldPosition; // Always world space (fragPosition may be tangent space)
 in vec3 fragLightPosition[MAX_LIGHTS];
 in vec3 fragCameraPosition;
+in vec3 fragSunDirection;
 
 uniform bool uUseDiffuseTexture;		    // Flag to enable/disable the diffuse texture
 uniform bool uUseNormalTexture;          // Flag to enable/disable the normal texture
@@ -24,6 +25,11 @@ uniform vec3 uLightAttenuation[MAX_LIGHTS]; // x * d^2 + y * d + z
 uniform vec4 uLightColor[MAX_LIGHTS]; // RGB and intensity
 uniform vec4 uAmbientColor[MAX_LIGHTS]; // RGB and intensity
 uniform float uSpecularStrength;
+
+// The scene's sun (Source's light_environment): parallel rays with no falloff, so there
+// is no position and no attenuation, just a direction and a colour. Intensity 0 means the
+// scene has no sun and this whole term drops out, which is what an unset uniform gives.
+uniform vec4 uSunColor;  // RGB and intensity
 
 // Baked lightmap (QuakeFaceMesh): UV from world position. Texels hold exactly what
 // the Source engine stores in an LDR lightmap (ColorSpace::LinearToLightmap: the
@@ -90,6 +96,19 @@ void main()
         // Accumulate lighting from this light source
         totalBrightness += uLightColor[i].rgb * uLightColor[i].w * lightIntensity * diffuse;
         totalSpecular += specular;
+    }
+
+    // The sun. Parallel rays, so the light vector is the same everywhere and there is no
+    // distance term -- just Lambert against the surface normal, plus its own specular.
+    if (uSunColor.w > 0.0) {
+        vec3 sunDirection = normalize(-fragSunDirection);
+        float sunDiffuse = max(dot(normal, sunDirection), 0.0);
+        totalBrightness += uSunColor.rgb * uSunColor.w * sunDiffuse;
+
+        vec3 sunReflect = reflect(-sunDirection, normal);
+        float sunSpecularFactor = uUseSpecularTexture ? texture(specularTexture, fragTexCoord).r : 1.0;
+        float sunSpecularIntensity = pow(max(dot(viewDirection, sunReflect), 0.0), 32);
+        totalSpecular += sunSpecularFactor * uSpecularStrength * sunSpecularIntensity * uSunColor.w * uSunColor.rgb;
     }
 
     // Sample the diffuse texture color using the texture coordinates

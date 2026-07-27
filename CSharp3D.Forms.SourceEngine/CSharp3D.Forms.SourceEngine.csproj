@@ -31,6 +31,9 @@
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="OpenTK, Version=3.3.3.0, Culture=neutral, PublicKeyToken=bad199fe84eb3df4, processorArchitecture=MSIL">
+      <HintPath>..\packages\OpenTK.3.3.3\lib\net20\OpenTK.dll</HintPath>
+    </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Numerics" />
@@ -43,9 +46,15 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Lighting\BakeFace.cs" />
+    <Compile Include="Lighting\GpuBakeCapability.cs" />
+    <Compile Include="Lighting\GpuBakeContext.cs" />
+    <Compile Include="Lighting\GpuBakeSession.cs" />
+    <Compile Include="Lighting\GpuBatchOracle.cs" />
+    <Compile Include="Lighting\GpuRayTracer.cs" />
     <Compile Include="Lighting\LightmapBaker.cs" />
     <Compile Include="Lighting\LuxelGrid.cs" />
     <Compile Include="Lighting\RayBvh.cs" />
+    <Compile Include="Lighting\RayOracle.cs" />
     <Compile Include="Lighting\RadFile.cs" />
     <Compile Include="Lighting\SourceColorSpace.cs" />
     <Compile Include="Lighting\SourceLight.cs" />
@@ -53,6 +62,9 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="Shaders\SourceEngine\LightmapBake\occlusion.glsl">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="Shaders\SourceEngine\SpriteCard\frag.glsl">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

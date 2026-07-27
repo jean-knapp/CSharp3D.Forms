@@ -123,6 +123,9 @@
     <Compile Include="Engine\ViewFrustum.cs" />
     <Compile Include="Engine\Vertex.cs" />
     <Compile Include="Exceptions\CameraNotSetException.cs" />
+    <Compile Include="Lights\DirectionalLight.cs">
+      <SubType>Component</SubType>
+    </Compile>
     <Compile Include="Lights\PointLight.cs">
       <SubType>Component</SubType>
     </Compile>

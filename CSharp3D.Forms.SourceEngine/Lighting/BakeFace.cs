@@ -18,6 +18,17 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// <summary>Caller's identity for this face (the editor's MapFace).</summary>
         public object Key;
 
+        private static long _nextIdentity;
+
+        /// <summary>
+        /// Identity that survives an edit: a modified face is handed to the baker as a
+        /// NEW <see cref="BakeFace"/>, and <see cref="InheritFrom"/> carries this across.
+        /// It lets the baker tell "the same face moved" (list indices still mean the same
+        /// faces, so a BVH built before the edit is still usable) from "the face list
+        /// changed shape" (indices shifted, the BVH's triangle ids are meaningless).
+        /// </summary>
+        internal long Identity = System.Threading.Interlocked.Increment(ref _nextIdentity);
+
         /// <summary>Face polygon, world space, outward winding.</summary>
         public Vector3[] Winding;
 
@@ -82,26 +93,77 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         internal int BakedLevel = -1;
 
         /// <summary>
-        /// Bounce output: total indirect light per patch of <see cref="PatchGrid"/>.
-        /// Patch space is world-anchored and independent of the direct grid's resolution,
-        /// so <see cref="LightmapBaker"/> resamples it per publish — mixing bounce from
-        /// one pass with direct light of any other pass level stays correct.
-        /// Both fields are only ever swapped in together, complete, after a full bounce
-        /// solve (never cleared first), so the displayed image cannot dip to direct-only
-        /// between bounce runs.
+        /// Bounce output: indirect light per patch, plus the patch grid it is indexed by,
+        /// as ONE immutable object. Patch space is world-anchored and independent of the
+        /// direct grid's resolution, so <see cref="LightmapBaker"/> resamples it per
+        /// publish — mixing bounce from one solve with direct light of any pass level
+        /// stays correct. Swapped in complete (never cleared first), so the displayed
+        /// image cannot dip to direct-only between bounce runs; grid and data travel
+        /// together so a publish racing a solve can never pair one solve's grid with
+        /// another's data.
         /// </summary>
-        internal LuxelGrid PatchGrid;
+        internal volatile PatchLighting Bounce;
 
-        internal Vector3[] PatchIndirect;
+        /// <summary>
+        /// The patch lattice for this face's geometry, cached across bounce solves —
+        /// it depends only on the winding, and rebuilding it for every face on every
+        /// solve was the bulk of a re-bounce's cost on a large map.
+        /// </summary>
+        internal LuxelGrid PatchGridCache;
+
+        /// <summary>
+        /// The <c>emit_surface</c> lights this face expands into (empty for a
+        /// non-emissive material), cached because they too depend only on the face.
+        /// A geometry edit makes new BakeFace objects for the faces that changed, so
+        /// their caches are empty and only they pay to rebuild.
+        /// </summary>
+        internal System.Collections.Generic.List<SourceLight> SurfaceEmitters;
 
         /// <summary>Published, immutable snapshot for the renderer. Atomic swap.</summary>
         public volatile LightmapResult Result;
+
+        /// <summary>
+        /// Take over the display state of the previous incarnation of this face (the
+        /// object the baker held before this edit replaced it).
+        ///
+        /// The lightmap itself is "stale until replaced" — plan §3. The BOUNCE has to
+        /// come with it: without it, the face's first republish composes direct light
+        /// alone, which reads as the face suddenly going dark and only recovering when
+        /// the next whole-map bounce solve lands seconds later. Patch space is
+        /// world-anchored and sampling clamps at the grid edge, so inheriting it is
+        /// exactly as safe as inheriting the lightmap.
+        /// </summary>
+        public void InheritFrom(BakeFace previous)
+        {
+            if (previous == null || ReferenceEquals(previous, this))
+                return;
+
+            Identity = previous.Identity;
+            Result = previous.Result;
+            Bounce = previous.Bounce;
+        }
     }
 
     /// <summary>
-    /// An immutable baked lightmap for one face. Rgb is the encoded texture (see
-    /// <see cref="LightmapBaker"/>): sqrt-encoded quarter-intensity, decoded in
-    /// the shader as (texel²·4), giving a 0–4× overbright range.
+    /// One face's indirect light and the patch lattice it is indexed by, immutable so the
+    /// pair can be swapped atomically (see <see cref="BakeFace.Bounce"/>).
+    /// </summary>
+    internal sealed class PatchLighting
+    {
+        public readonly LuxelGrid Grid;
+        public readonly Vector3[] Indirect;
+
+        public PatchLighting(LuxelGrid grid, Vector3[] indirect)
+        {
+            Grid = grid;
+            Indirect = indirect;
+        }
+    }
+
+    /// <summary>
+    /// An immutable baked lightmap for one face. Rgb holds exactly the bytes the Source
+    /// engine would store (<see cref="SourceColorSpace.EncodeLuxel"/>); the shader
+    /// applies the engine's ×OVERBRIGHT on the way out.
     /// </summary>
     public class LightmapResult
     {

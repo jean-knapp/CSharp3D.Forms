@@ -29,8 +29,12 @@ void main()
     geomPosition = vec3(uModel * vec4(inPosition, 1.0));
     geomWorldPosition = geomPosition;
 
-    // Pass the texture coordinates and normal vector to the fragment shader
-    geomNormal = inNormal;   
+    // Rotate the normal into world space. GetModelMatrix builds rotation + translation
+    // with no scale, so the upper 3x3 is a pure rotation and needs no inverse-transpose.
+    // Without this a rotated mesh (a model placed at a yaw, say) is lit as though it were
+    // not rotated -- invisible while the only light was a point light near the object, but
+    // obvious under a directional light, where the shading is pure dot(N, sunDir).
+    geomNormal = normalize(mat3(uModel) * inNormal);
     geomTexCoord = inTexCoord; 
 
     geomModel = uModel;

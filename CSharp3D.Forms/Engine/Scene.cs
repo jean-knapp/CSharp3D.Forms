@@ -68,6 +68,18 @@ namespace CSharp3D.Forms.Engine
         public List<PointLight> Lights = new List<PointLight>();
 
         /// <summary>
+        /// The scene's directional light — its sun. Null (the default) means no sun, and the
+        /// scene lights exactly as it did before directional lights existed.
+        ///
+        /// There is one rather than a list because a directional light has no position: a
+        /// second one would just be a second global tint, which the ambient term already
+        /// covers. Source models the same thing with a single <c>light_environment</c>.
+        /// </summary>
+        [Category("Scene")]
+        [Description("The scene's directional light (its sun). Null for no sun.")]
+        public DirectionalLight Sun { get; set; }
+
+        /// <summary>
         /// The list of meshes in the scene.
         /// </summary>
         public List<Mesh> Meshes = new List<Mesh>();

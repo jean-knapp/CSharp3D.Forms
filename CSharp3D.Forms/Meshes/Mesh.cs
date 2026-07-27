@@ -83,6 +83,17 @@ namespace CSharp3D.Forms.Meshes
         public bool Clickable { get; set; } = false;
 
         /// <summary>
+        /// Per-mesh override of <see cref="Scene.FullBright"/>: draw this mesh as plain
+        /// albedo even in a lit scene. Exists for lightmapped viewers — a face whose bake
+        /// has not landed yet has no lighting information at all, and falling through to
+        /// the dynamic-light path renders it near-black. Showing the unlit texture instead
+        /// means a warming-up lightmap preview never blacks the world out; each face
+        /// simply gains its lighting when its lightmap arrives.
+        /// </summary>
+        [Browsable(false)]
+        public bool ForceFullBright { get; set; } = false;
+
+        /// <summary>
         /// How the mesh interacts with the depth buffer. <see cref="MeshDepthMode.Normal"/> is the
         /// ordinary depth-tested draw. <see cref="MeshDepthMode.Overlay"/> ignores the depth test
         /// entirely, so the mesh draws in front of everything already rendered — what an editor's
@@ -546,7 +557,7 @@ namespace CSharp3D.Forms.Meshes
                 // it (see Scene.FullBright).
                 int fullBrightLocation = Shader.GetUniformLocation(context, shaderProgram, "uFullBright");
                 if (fullBrightLocation >= 0)
-                    GL.Uniform1(fullBrightLocation, scene != null && scene.FullBright ? 1 : 0);
+                    GL.Uniform1(fullBrightLocation, ForceFullBright || (scene != null && scene.FullBright) ? 1 : 0);
 
                 int useNormalTextureLocation = Shader.GetUniformLocation(context, shaderProgram, "uUseNormalTexture");
                 GL.Uniform1(useNormalTextureLocation, Material.Normal != null && Material.Normal.Bitmap != null ? 1 : 0);
@@ -632,6 +643,28 @@ namespace CSharp3D.Forms.Meshes
                         lightAttenuations[posIndex + 1] = 0.0f; 
                         lightAttenuations[posIndex + 2] = 0.0f;
                     }
+                }
+
+                // The sun. A scene without one uploads intensity 0, which the shader reads
+                // as "no directional light" — so nothing changes for scenes that never set it.
+                int sunDirectionLocation = Shader.GetUniformLocation(context, shaderProgram, "uSunDirection");
+                int sunColorLocation = Shader.GetUniformLocation(context, shaderProgram, "uSunColor");
+
+                DirectionalLight sun = Material.Unlit ? null : scene.Sun;
+                if (sun != null && sun.Intensity > 0f)
+                {
+                    // Direction is authored in World units; the shader works in GL space.
+                    Vector3 sunDirection = VectorOrientation.ToGL(new LocationVector(
+                        sun.NormalizedDirection.X, sun.NormalizedDirection.Y, sun.NormalizedDirection.Z));
+
+                    GL.Uniform3(sunDirectionLocation, sunDirection);
+                    GL.Uniform4(sunColorLocation,
+                        new Vector4(sun.Color.R / 255f, sun.Color.G / 255f, sun.Color.B / 255f, sun.Intensity));
+                }
+                else
+                {
+                    GL.Uniform3(sunDirectionLocation, new Vector3(0, -1, 0));
+                    GL.Uniform4(sunColorLocation, new Vector4(1, 1, 1, 0));
                 }
 
                 // Send all uniform data

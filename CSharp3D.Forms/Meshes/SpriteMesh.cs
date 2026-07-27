@@ -35,6 +35,24 @@ namespace CSharp3D.Forms.Meshes
         public bool ZAxisRotationOnly { get; set; } = false;
 
         /// <summary>
+        /// Shifts the quad inside its own plane, along the width axis, in World units.
+        /// The quad is otherwise centred on <see cref="Mesh.Location"/>; an offset moves the
+        /// card while leaving the anchor point where it is, which is how Source anchors a
+        /// detail sprite by a fraction of its own size rather than by its centre.
+        /// </summary>
+        [Category("Position")]
+        [Description("Shifts the quad along its width axis, in World units, without moving its anchor point.")]
+        public float OffsetX { get; set; } = 0;
+
+        /// <summary>
+        /// Shifts the quad inside its own plane, along the height axis, in World units.
+        /// See <see cref="OffsetX"/>.
+        /// </summary>
+        [Category("Position")]
+        [Description("Shifts the quad along its height axis, in World units, without moving its anchor point.")]
+        public float OffsetY { get; set; } = 0;
+
+        /// <summary>
         /// Left, Top, Right, Bottom UV map.
         /// </summary>
         [Category("Material")]
@@ -61,10 +79,10 @@ namespace CSharp3D.Forms.Meshes
             // Face east (x axis
             Vertex[] vertices = new Vertex[]
             {
-                new Vertex(new Vector3(0, -Width/2f, -Height/2f), new Vector2(UV.Left, UV.Bottom)),
-                new Vertex(new Vector3(0, Width/2f, -Height/2f), new Vector2(UV.Right, UV.Bottom)),
-                new Vertex(new Vector3(0, Width/2f, Height/2f), new Vector2(UV.Right, UV.Top)),
-                new Vertex(new Vector3(0, -Width/2f, Height/2f), new Vector2(UV.Left, UV.Top))
+                new Vertex(new Vector3(0, OffsetX - Width/2f, OffsetY - Height/2f), new Vector2(UV.Left, UV.Bottom)),
+                new Vertex(new Vector3(0, OffsetX + Width/2f, OffsetY - Height/2f), new Vector2(UV.Right, UV.Bottom)),
+                new Vertex(new Vector3(0, OffsetX + Width/2f, OffsetY + Height/2f), new Vector2(UV.Right, UV.Top)),
+                new Vertex(new Vector3(0, OffsetX - Width/2f, OffsetY + Height/2f), new Vector2(UV.Left, UV.Top))
 
             };
             // Cuboid vertex data with positions and texture coordinates

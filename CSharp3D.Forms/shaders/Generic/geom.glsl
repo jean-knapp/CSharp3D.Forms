@@ -19,6 +19,8 @@ in vec3 geomWorldPosition[];	// The world-space position for the geometry
 in mat4 geomModel[];
 
 uniform vec3 uLightPosition[MAX_LIGHTS];   // Light positions as uniforms
+uniform vec3 uSunDirection;                // Directional light, GL space
+out vec3 fragSunDirection;                 // ... in whichever space fragNormal is in
 in vec3 geomCameraPosition[];
 
 uniform bool uUseNormalTexture;
@@ -64,6 +66,7 @@ void main()
 				fragLightPosition[j] = TBN * uLightPosition[j];
 			}
 			fragCameraPosition = TBN * geomCameraPosition[i];
+			fragSunDirection = TBN * uSunDirection;
 		}
 		else {
 			fragPosition = geomPosition[i];
@@ -71,6 +74,7 @@ void main()
 				fragLightPosition[j] = uLightPosition[j];
 			}
 			fragCameraPosition = geomCameraPosition[i];
+			fragSunDirection = uSunDirection;
 		}
 
 		gl_Position = gl_in[i].gl_Position;
