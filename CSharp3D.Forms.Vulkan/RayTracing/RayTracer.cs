@@ -49,6 +49,17 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         private DescriptorSetLayout _denoiseSetLayout;
         private DescriptorSetLayout _luminanceSetLayout;
         private DescriptorSetLayout _tonemapSetLayout;
+        private DescriptorSetLayout _overlaySetLayout;
+        private PipelineLayout _overlayPipelineLayout;
+        private Pipeline _overlayLinePipeline;
+        private Pipeline _overlayTrianglePipeline;
+        private RenderPass _overlayRenderPass;
+        private Framebuffer _overlayFramebuffer;
+        private DescriptorSet _overlaySet;
+        private Buffer _overlayVertices;
+        private int _overlayCapacity;
+        private int _overlayVersion = -1;
+        private IReadOnlyList<OverlayBatch> _overlayBatches = new OverlayBatch[0];
         private PipelineLayout _rtPipelineLayout;
         private PipelineLayout _denoisePipelineLayout;
         private PipelineLayout _luminancePipelineLayout;
@@ -80,7 +91,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         private readonly Image[] _normal = new Image[2];
         private readonly Image[] _direct = new Image[2];
         private readonly Image[] _indirect = new Image[2];
-        private Image _albedo;
+        private readonly Image[] _albedo = new Image[2];
         private Image _pingA;
         private Image _pingB;
         private Image _hdr;
@@ -131,6 +142,8 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             VulkanDevice.Stage("ray tracing pipeline created");
             CreateComputePipelines(compiler);
             VulkanDevice.Stage("compute pipelines created");
+            CreateOverlayPass(compiler);
+            VulkanDevice.Stage("overlay pass created");
             CreateShaderBindingTable();
             VulkanDevice.Stage("shader binding table built");
             CreatePool();
@@ -160,7 +173,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 Binding(6, DescriptorType.StorageImage, 2, rg),
                 Binding(7, DescriptorType.StorageImage, 2, rg),
                 Binding(8, DescriptorType.StorageImage, 2, rg),
-                Binding(9, DescriptorType.StorageImage, 1, rg),
+                Binding(9, DescriptorType.StorageImage, 2, rg),
                 Binding(10, DescriptorType.CombinedImageSampler, MaxTextures, rg),
             };
 
@@ -199,7 +212,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 Binding(3, DescriptorType.StorageImage, 1, cs),
                 Binding(4, DescriptorType.StorageImage, 1, cs),
                 Binding(5, DescriptorType.StorageImage, 2, cs),
-                Binding(6, DescriptorType.StorageImage, 1, cs),
+                Binding(6, DescriptorType.StorageImage, 2, cs),
                 Binding(7, DescriptorType.StorageImage, 1, cs));
 
             _luminanceSetLayout = SimpleLayout(
@@ -210,6 +223,45 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 Binding(0, DescriptorType.StorageImage, 1, cs),
                 Binding(1, DescriptorType.StorageImage, 1, cs),
                 Binding(2, DescriptorType.StorageBuffer, 1, cs));
+
+            // The overlay pass: the depth it tests against, and the icon textures.
+            const ShaderStageFlags fs = ShaderStageFlags.FragmentBit;
+
+            DescriptorSetLayoutBinding[] overlay =
+            {
+                Binding(0, DescriptorType.StorageImage, 2, fs),
+                Binding(1, DescriptorType.StorageImage, 2, fs),
+                Binding(2, DescriptorType.CombinedImageSampler, MaxTextures, fs),
+            };
+
+            DescriptorBindingFlags[] overlayFlags = new DescriptorBindingFlags[overlay.Length];
+            overlayFlags[overlay.Length - 1] = DescriptorBindingFlags.PartiallyBoundBit | DescriptorBindingFlags.VariableDescriptorCountBit;
+
+            fixed (DescriptorSetLayoutBinding* pBindings = overlay)
+            fixed (DescriptorBindingFlags* pFlags = overlayFlags)
+            {
+                DescriptorSetLayoutBindingFlagsCreateInfo flagsInfo = new DescriptorSetLayoutBindingFlagsCreateInfo
+                {
+                    SType = StructureType.DescriptorSetLayoutBindingFlagsCreateInfo,
+                    BindingCount = (uint)overlayFlags.Length,
+                    PBindingFlags = pFlags,
+                };
+
+                DescriptorSetLayoutCreateInfo info = new DescriptorSetLayoutCreateInfo
+                {
+                    SType = StructureType.DescriptorSetLayoutCreateInfo,
+                    BindingCount = (uint)overlay.Length,
+                    PBindings = pBindings,
+                    PNext = &flagsInfo,
+                };
+
+                DescriptorSetLayout layout;
+                VulkanDevice.Check(_device.Api.CreateDescriptorSetLayout(_device.Device, &info, null, &layout), "vkCreateDescriptorSetLayout");
+                _overlaySetLayout = layout;
+            }
+
+            _overlayPipelineLayout = PipelineLayoutFor(_overlaySetLayout, (uint)sizeof(OverlayPush),
+                ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit);
 
             _rtPipelineLayout = PipelineLayoutFor(_rtSetLayout, 0);
             _denoisePipelineLayout = PipelineLayoutFor(_denoiseSetLayout, (uint)sizeof(DenoisePush));
@@ -245,11 +297,11 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             }
         }
 
-        private PipelineLayout PipelineLayoutFor(DescriptorSetLayout setLayout, uint pushBytes)
+        private PipelineLayout PipelineLayoutFor(DescriptorSetLayout setLayout, uint pushBytes, ShaderStageFlags pushStages = ShaderStageFlags.ComputeBit)
         {
             PushConstantRange push = new PushConstantRange
             {
-                StageFlags = ShaderStageFlags.ComputeBit,
+                StageFlags = pushStages,
                 Offset = 0,
                 Size = pushBytes,
             };
@@ -377,6 +429,196 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             }
         }
 
+        /// <summary>
+        /// The pass that rasterises the editor's guides over the tone-mapped picture: a
+        /// render pass that keeps what is already in the LDR image, and a pipeline each for
+        /// lines and triangles, alpha blended, with no depth attachment - the fragment shader
+        /// tests against the ray tracer's own hit distances instead.
+        /// </summary>
+        private void CreateOverlayPass(ShaderCompiler compiler)
+        {
+            Silk.NET.Vulkan.Vk vk = _device.Api;
+
+            // ---- render pass ----
+
+            AttachmentDescription colour = new AttachmentDescription
+            {
+                Format = Format.R8G8B8A8Unorm,
+                Samples = SampleCountFlags.Count1Bit,
+                LoadOp = AttachmentLoadOp.Load,
+                StoreOp = AttachmentStoreOp.Store,
+                StencilLoadOp = AttachmentLoadOp.DontCare,
+                StencilStoreOp = AttachmentStoreOp.DontCare,
+                InitialLayout = ImageLayout.General,
+                FinalLayout = ImageLayout.General,
+            };
+
+            AttachmentReference reference = new AttachmentReference { Attachment = 0, Layout = ImageLayout.General };
+
+            SubpassDescription subpass = new SubpassDescription
+            {
+                PipelineBindPoint = PipelineBindPoint.Graphics,
+                ColorAttachmentCount = 1,
+                PColorAttachments = &reference,
+            };
+
+            SubpassDependency dependency = new SubpassDependency
+            {
+                SrcSubpass = Silk.NET.Vulkan.Vk.SubpassExternal,
+                DstSubpass = 0,
+                SrcStageMask = PipelineStageFlags.AllCommandsBit,
+                DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.FragmentShaderBit,
+                SrcAccessMask = AccessFlags.MemoryWriteBit | AccessFlags.MemoryReadBit,
+                DstAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.ColorAttachmentReadBit | AccessFlags.ShaderReadBit,
+            };
+
+            RenderPassCreateInfo passInfo = new RenderPassCreateInfo
+            {
+                SType = StructureType.RenderPassCreateInfo,
+                AttachmentCount = 1,
+                PAttachments = &colour,
+                SubpassCount = 1,
+                PSubpasses = &subpass,
+                DependencyCount = 1,
+                PDependencies = &dependency,
+            };
+
+            RenderPass renderPass;
+            VulkanDevice.Check(vk.CreateRenderPass(_device.Device, &passInfo, null, &renderPass), "vkCreateRenderPass");
+            _overlayRenderPass = renderPass;
+
+            // ---- pipelines ----
+
+            byte* entry = (byte*)SilkMarshal.StringToPtr("main");
+
+            try
+            {
+                PipelineShaderStageCreateInfo[] stages =
+                {
+                    Stage(compiler, "overlay.vert", ShaderCompiler.Kind.Vertex, ShaderStageFlags.VertexBit, entry),
+                    Stage(compiler, "overlay.frag", ShaderCompiler.Kind.Fragment, ShaderStageFlags.FragmentBit, entry),
+                };
+
+                VertexInputBindingDescription binding = new VertexInputBindingDescription
+                {
+                    Binding = 0,
+                    Stride = (uint)(OverlaySet.FloatsPerVertex * sizeof(float)),
+                    InputRate = VertexInputRate.Vertex,
+                };
+
+                VertexInputAttributeDescription[] attributes =
+                {
+                    new VertexInputAttributeDescription { Location = 0, Binding = 0, Format = Format.R32G32B32Sfloat, Offset = 0 },
+                    new VertexInputAttributeDescription { Location = 1, Binding = 0, Format = Format.R32G32B32A32Sfloat, Offset = 12 },
+                    new VertexInputAttributeDescription { Location = 2, Binding = 0, Format = Format.R32G32Sfloat, Offset = 28 },
+                    new VertexInputAttributeDescription { Location = 3, Binding = 0, Format = Format.R32G32Sfloat, Offset = 36 },
+                };
+
+                DynamicState[] dynamic = { DynamicState.Viewport, DynamicState.Scissor };
+
+                fixed (PipelineShaderStageCreateInfo* pStages = stages)
+                fixed (VertexInputAttributeDescription* pAttributes = attributes)
+                fixed (DynamicState* pDynamic = dynamic)
+                {
+                    PipelineVertexInputStateCreateInfo vertexInput = new PipelineVertexInputStateCreateInfo
+                    {
+                        SType = StructureType.PipelineVertexInputStateCreateInfo,
+                        VertexBindingDescriptionCount = 1,
+                        PVertexBindingDescriptions = &binding,
+                        VertexAttributeDescriptionCount = (uint)attributes.Length,
+                        PVertexAttributeDescriptions = pAttributes,
+                    };
+
+                    PipelineViewportStateCreateInfo viewport = new PipelineViewportStateCreateInfo
+                    {
+                        SType = StructureType.PipelineViewportStateCreateInfo,
+                        ViewportCount = 1,
+                        ScissorCount = 1,
+                    };
+
+                    PipelineRasterizationStateCreateInfo rasterization = new PipelineRasterizationStateCreateInfo
+                    {
+                        SType = StructureType.PipelineRasterizationStateCreateInfo,
+                        PolygonMode = PolygonMode.Fill,
+                        CullMode = CullModeFlags.None,
+                        FrontFace = FrontFace.CounterClockwise,
+                        LineWidth = 1f,
+                    };
+
+                    PipelineMultisampleStateCreateInfo multisample = new PipelineMultisampleStateCreateInfo
+                    {
+                        SType = StructureType.PipelineMultisampleStateCreateInfo,
+                        RasterizationSamples = SampleCountFlags.Count1Bit,
+                    };
+
+                    PipelineColorBlendAttachmentState blendAttachment = new PipelineColorBlendAttachmentState
+                    {
+                        BlendEnable = true,
+                        SrcColorBlendFactor = BlendFactor.SrcAlpha,
+                        DstColorBlendFactor = BlendFactor.OneMinusSrcAlpha,
+                        ColorBlendOp = BlendOp.Add,
+                        SrcAlphaBlendFactor = BlendFactor.One,
+                        DstAlphaBlendFactor = BlendFactor.Zero,
+                        AlphaBlendOp = BlendOp.Add,
+                        ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit | ColorComponentFlags.BBit | ColorComponentFlags.ABit,
+                    };
+
+                    PipelineColorBlendStateCreateInfo blend = new PipelineColorBlendStateCreateInfo
+                    {
+                        SType = StructureType.PipelineColorBlendStateCreateInfo,
+                        AttachmentCount = 1,
+                        PAttachments = &blendAttachment,
+                    };
+
+                    PipelineDynamicStateCreateInfo dynamicState = new PipelineDynamicStateCreateInfo
+                    {
+                        SType = StructureType.PipelineDynamicStateCreateInfo,
+                        DynamicStateCount = (uint)dynamic.Length,
+                        PDynamicStates = pDynamic,
+                    };
+
+                    foreach (PrimitiveTopology topology in new[] { PrimitiveTopology.LineList, PrimitiveTopology.TriangleList })
+                    {
+                        PipelineInputAssemblyStateCreateInfo assembly = new PipelineInputAssemblyStateCreateInfo
+                        {
+                            SType = StructureType.PipelineInputAssemblyStateCreateInfo,
+                            Topology = topology,
+                        };
+
+                        GraphicsPipelineCreateInfo info = new GraphicsPipelineCreateInfo
+                        {
+                            SType = StructureType.GraphicsPipelineCreateInfo,
+                            StageCount = (uint)stages.Length,
+                            PStages = pStages,
+                            PVertexInputState = &vertexInput,
+                            PInputAssemblyState = &assembly,
+                            PViewportState = &viewport,
+                            PRasterizationState = &rasterization,
+                            PMultisampleState = &multisample,
+                            PColorBlendState = &blend,
+                            PDynamicState = &dynamicState,
+                            Layout = _overlayPipelineLayout,
+                            RenderPass = _overlayRenderPass,
+                            Subpass = 0,
+                        };
+
+                        Pipeline pipeline;
+                        VulkanDevice.Check(vk.CreateGraphicsPipelines(_device.Device, default(PipelineCache), 1, &info, null, &pipeline),
+                            "vkCreateGraphicsPipelines");
+
+                        if (topology == PrimitiveTopology.LineList)
+                            _overlayLinePipeline = pipeline;
+                        else
+                            _overlayTrianglePipeline = pipeline;
+                    }
+                }
+            }
+            finally
+            {
+                SilkMarshal.Free((nint)entry);
+            }
+        }
+
         private Pipeline ComputePipeline(PipelineShaderStageCreateInfo stage, PipelineLayout layout)
         {
             ComputePipelineCreateInfo info = new ComputePipelineCreateInfo
@@ -454,10 +696,10 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             DescriptorPoolSize[] sizes =
             {
                 new DescriptorPoolSize(DescriptorType.AccelerationStructureKhr, 1),
-                new DescriptorPoolSize(DescriptorType.StorageImage, 32),
+                new DescriptorPoolSize(DescriptorType.StorageImage, 40),
                 new DescriptorPoolSize(DescriptorType.UniformBuffer, 1),
                 new DescriptorPoolSize(DescriptorType.StorageBuffer, 6),
-                new DescriptorPoolSize(DescriptorType.CombinedImageSampler, MaxTextures),
+                new DescriptorPoolSize(DescriptorType.CombinedImageSampler, 2 * MaxTextures),
             };
 
             fixed (DescriptorPoolSize* p = sizes)
@@ -465,7 +707,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 DescriptorPoolCreateInfo info = new DescriptorPoolCreateInfo
                 {
                     SType = StructureType.DescriptorPoolCreateInfo,
-                    MaxSets = 4,
+                    MaxSets = 5,
                     PoolSizeCount = (uint)sizes.Length,
                     PPoolSizes = p,
                     Flags = DescriptorPoolCreateFlags.UpdateAfterBindBit,
@@ -486,6 +728,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             };
 
             _rtSet = Allocate(_rtSetLayout, &variable);
+            _overlaySet = Allocate(_overlaySetLayout, &variable);
             _denoiseSet = Allocate(_denoiseSetLayout, null);
             _luminanceSet = Allocate(_luminanceSetLayout, null);
             _tonemapSet = Allocate(_tonemapSetLayout, null);
@@ -574,6 +817,36 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                         SType = StructureType.WriteDescriptorSet,
                         DstSet = _rtSet,
                         DstBinding = 10,
+                        DescriptorCount = (uint)textureCount,
+                        DescriptorType = DescriptorType.CombinedImageSampler,
+                        PImageInfo = images,
+                    });
+                }
+
+                // ---- the overlay pass ----
+
+                writes.Add(ImageWrite(pinned, _overlaySet, 0, _position));
+                writes.Add(ImageWrite(pinned, _overlaySet, 1, _normal));
+
+                if (textureCount > 0)
+                {
+                    DescriptorImageInfo* images = (DescriptorImageInfo*)Pin(pinned, sizeof(DescriptorImageInfo) * textureCount);
+
+                    for (int i = 0; i < textureCount; i++)
+                    {
+                        images[i] = new DescriptorImageInfo
+                        {
+                            Sampler = _scene.Sampler,
+                            ImageView = _scene.Textures[i].View,
+                            ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
+                        };
+                    }
+
+                    writes.Add(new WriteDescriptorSet
+                    {
+                        SType = StructureType.WriteDescriptorSet,
+                        DstSet = _overlaySet,
+                        DstBinding = 2,
                         DescriptorCount = (uint)textureCount,
                         DescriptorType = DescriptorType.CombinedImageSampler,
                         PImageInfo = images,
@@ -722,13 +995,31 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 _normal[i] = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
                 _direct[i] = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
                 _indirect[i] = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
+                _albedo[i] = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
             }
 
-            _albedo = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
             _pingA = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
             _pingB = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
             _hdr = _device.CreateImage(width, height, Format.R32G32B32A32Sfloat, storage);
-            _ldr = _device.CreateImage(width, height, Format.R8G8B8A8Unorm, ImageUsageFlags.StorageBit | ImageUsageFlags.TransferSrcBit);
+            _ldr = _device.CreateImage(width, height, Format.R8G8B8A8Unorm,
+                ImageUsageFlags.StorageBit | ImageUsageFlags.TransferSrcBit | ImageUsageFlags.ColorAttachmentBit);
+
+            ImageView attachment = _ldr.View;
+
+            FramebufferCreateInfo framebufferInfo = new FramebufferCreateInfo
+            {
+                SType = StructureType.FramebufferCreateInfo,
+                RenderPass = _overlayRenderPass,
+                AttachmentCount = 1,
+                PAttachments = &attachment,
+                Width = width,
+                Height = height,
+                Layers = 1,
+            };
+
+            Framebuffer framebuffer;
+            VulkanDevice.Check(_device.Api.CreateFramebuffer(_device.Device, &framebufferInfo, null, &framebuffer), "vkCreateFramebuffer");
+            _overlayFramebuffer = framebuffer;
 
             CommandBuffer cmd = _device.BeginOneShot();
 
@@ -749,9 +1040,9 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 if (_normal[i] != null) yield return _normal[i];
                 if (_direct[i] != null) yield return _direct[i];
                 if (_indirect[i] != null) yield return _indirect[i];
+                if (_albedo[i] != null) yield return _albedo[i];
             }
 
-            if (_albedo != null) yield return _albedo;
             if (_pingA != null) yield return _pingA;
             if (_pingB != null) yield return _pingB;
             if (_hdr != null) yield return _hdr;
@@ -760,13 +1051,19 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
         private void DisposeImages()
         {
+            if (_overlayFramebuffer.Handle != 0)
+            {
+                _device.Api.DestroyFramebuffer(_device.Device, _overlayFramebuffer, null);
+                _overlayFramebuffer = default;
+            }
+
             foreach (Image image in AllImages())
                 image.Dispose();
 
             for (int i = 0; i < 2; i++)
-                _position[i] = _normal[i] = _direct[i] = _indirect[i] = null;
+                _position[i] = _normal[i] = _direct[i] = _indirect[i] = _albedo[i] = null;
 
-            _albedo = _pingA = _pingB = _hdr = _ldr = null;
+            _pingA = _pingB = _hdr = _ldr = null;
         }
 
         /// <summary>
@@ -804,13 +1101,17 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         /// Trace, denoise, expose, tone map and present one frame. Returns false when the
         /// swapchain has to be rebuilt first (the window changed size under it).
         /// </summary>
-        public bool Render(VulkanSwapchain swapchain, Matrix4x4 viewProj, Matrix4x4 invViewProj, Vector3 cameraPosition, double deltaSeconds)
+        public bool Render(VulkanSwapchain swapchain, Matrix4x4 view, Matrix4x4 viewProj, Matrix4x4 invViewProj, Vector3 cameraPosition, double deltaSeconds)
         {
             if (_hdr == null || !swapchain.IsUsable)
                 return true;
 
             Trace("wait");
             WaitForFrame();
+
+            // The GPU is idle now: the overlay vertices can be replaced under it.
+            UploadOverlays(_scene.Overlays);
+            _overlayCamera = new OverlayCamera(view, viewProj, cameraPosition);
 
             // A moved camera keeps the picture through reprojection but caps how much history
             // a pixel may carry; a still one lets it grow, which is what converges.
@@ -847,9 +1148,11 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 Samples = Samples,
                 Flags = _resetPending ? FrameData.FlagReset : 0u,
                 Units = new Vector4(UnitsPerMetre, Bounces, Math.Max(1, LightsPerSample), spp),
+                // z says the camera is still: every pixel keeps its history then, whatever
+                // its jittered sample hit, which is what antialiases the edges.
                 History = moved
                     ? new Vector4(MovingHistoryIndirect, MovingHistoryDirect, 0f, 0f)
-                    : new Vector4(65536f, 65536f, 0f, 0f),
+                    : new Vector4(65536f, 65536f, 1f, 0f),
             };
 
             _frameBuffer.Write(new[] { frame });
@@ -874,6 +1177,126 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
             VulkanDevice.Check(present, "vkQueuePresentKHR");
             return true;
+        }
+
+        private struct OverlayCamera
+        {
+            public Matrix4x4 ViewProj;
+            public Vector4 Right;
+            public Vector4 Up;
+            public Vector4 Position;
+
+            public OverlayCamera(Matrix4x4 view, Matrix4x4 viewProj, Vector3 position)
+            {
+                ViewProj = viewProj;
+
+                // The view matrix is the GL one (row vectors): its columns are the camera's
+                // axes in world space.
+                Right = new Vector4(view.M11, view.M21, view.M31, 0f);
+                Up = new Vector4(view.M12, view.M22, view.M32, 0f);
+                Position = new Vector4(position, 0f);
+            }
+        }
+
+        private OverlayCamera _overlayCamera;
+
+        /// <summary>Put a new overlay snapshot on the card. Only called with the GPU idle.</summary>
+        private void UploadOverlays(OverlaySet overlays)
+        {
+            if (overlays == null || overlays.Version == _overlayVersion)
+                return;
+
+            _overlayVersion = overlays.Version;
+            _overlayBatches = overlays.Batches;
+
+            int floats = overlays.Vertices.Length;
+
+            if (floats == 0)
+                return;
+
+            if (_overlayVertices == null || floats > _overlayCapacity)
+            {
+                _overlayVertices?.Dispose();
+                _overlayCapacity = Math.Max(floats, _overlayCapacity * 2);
+                _overlayVertices = _device.CreateBuffer((ulong)(_overlayCapacity * sizeof(float)), BufferUsageFlags.VertexBufferBit,
+                    MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit);
+            }
+
+            _overlayVertices.Write(overlays.Vertices);
+        }
+
+        private static uint DepthModeCode(CSharp3D.Forms.Meshes.MeshDepthMode mode)
+        {
+            switch (mode)
+            {
+                case CSharp3D.Forms.Meshes.MeshDepthMode.Overlay: return 1;
+                case CSharp3D.Forms.Meshes.MeshDepthMode.OccludedOnly: return 2;
+                default: return 0;
+            }
+        }
+
+        /// <summary>The editor's guides over the finished picture, inside the overlay render pass.</summary>
+        private void RecordOverlays(uint parity)
+        {
+            if (_overlayVertices == null || _overlayBatches.Count == 0 || _overlayFramebuffer.Handle == 0)
+                return;
+
+            Silk.NET.Vulkan.Vk vk = _device.Api;
+
+            RenderPassBeginInfo begin = new RenderPassBeginInfo
+            {
+                SType = StructureType.RenderPassBeginInfo,
+                RenderPass = _overlayRenderPass,
+                Framebuffer = _overlayFramebuffer,
+                RenderArea = new Rect2D(new Offset2D(0, 0), new Extent2D(Width, Height)),
+            };
+
+            vk.CmdBeginRenderPass(_cmd, &begin, SubpassContents.Inline);
+
+            Viewport viewport = new Viewport(0, 0, Width, Height, 0f, 1f);
+            Rect2D scissor = new Rect2D(new Offset2D(0, 0), new Extent2D(Width, Height));
+            vk.CmdSetViewport(_cmd, 0, 1, &viewport);
+            vk.CmdSetScissor(_cmd, 0, 1, &scissor);
+
+            Silk.NET.Vulkan.Buffer vertexBuffer = _overlayVertices.Handle;
+            ulong offset = 0;
+            vk.CmdBindVertexBuffers(_cmd, 0, 1, &vertexBuffer, &offset);
+
+            DescriptorSet set = _overlaySet;
+            vk.CmdBindDescriptorSets(_cmd, PipelineBindPoint.Graphics, _overlayPipelineLayout, 0, 1, &set, 0, null);
+
+            OverlayTopology? bound = null;
+
+            foreach (OverlayBatch batch in _overlayBatches)
+            {
+                if (batch.VertexCount == 0)
+                    continue;
+
+                if (bound != batch.Topology)
+                {
+                    vk.CmdBindPipeline(_cmd, PipelineBindPoint.Graphics,
+                        batch.Topology == OverlayTopology.Lines ? _overlayLinePipeline : _overlayTrianglePipeline);
+                    bound = batch.Topology;
+                }
+
+                OverlayPush push = new OverlayPush
+                {
+                    ViewProj = _overlayCamera.ViewProj,
+                    Right = _overlayCamera.Right,
+                    Up = _overlayCamera.Up,
+                    CameraPos = _overlayCamera.Position,
+                    Parity = parity,
+                    DepthMode = DepthModeCode(batch.DepthMode),
+                    Dotted = batch.Dotted ? 1u : 0u,
+                    Texture = batch.Texture >= 0 ? (uint)batch.Texture : OverlayPush.NoTexture,
+                };
+
+                vk.CmdPushConstants(_cmd, _overlayPipelineLayout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 0,
+                    (uint)sizeof(OverlayPush), &push);
+                vk.CmdDraw(_cmd, (uint)batch.VertexCount, 1, (uint)batch.FirstVertex, 0);
+            }
+
+            vk.CmdEndRenderPass(_cmd);
         }
 
         private void Trace(string what)
@@ -1019,6 +1442,11 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
             _device.FullBarrier(_cmd);
 
+            // ---- the editor's guides ----
+
+            RecordOverlays(parity);
+            _device.FullBarrier(_cmd);
+
             // ---- to the window ----
 
             _device.Transition(_cmd, _ldr, ImageLayout.TransferSrcOptimal);
@@ -1143,6 +1571,13 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             _frameBuffer?.Dispose();
             _exposureBuffer?.Dispose();
             _sbt?.Dispose();
+            _overlayVertices?.Dispose();
+
+            if (_overlayLinePipeline.Handle != 0) vk.DestroyPipeline(_device.Device, _overlayLinePipeline, null);
+            if (_overlayTrianglePipeline.Handle != 0) vk.DestroyPipeline(_device.Device, _overlayTrianglePipeline, null);
+            if (_overlayPipelineLayout.Handle != 0) vk.DestroyPipelineLayout(_device.Device, _overlayPipelineLayout, null);
+            if (_overlayRenderPass.Handle != 0) vk.DestroyRenderPass(_device.Device, _overlayRenderPass, null);
+            if (_overlaySetLayout.Handle != 0) vk.DestroyDescriptorSetLayout(_device.Device, _overlaySetLayout, null);
 
             if (_fence.Handle != 0) vk.DestroyFence(_device.Device, _fence, null);
             if (_acquired.Handle != 0) vk.DestroySemaphore(_device.Device, _acquired, null);

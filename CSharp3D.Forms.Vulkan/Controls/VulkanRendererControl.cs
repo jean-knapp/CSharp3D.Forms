@@ -52,6 +52,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
         /// <summary>The camera as the render thread last heard of it. Replaced whole, never edited.</summary>
         private sealed class CameraPose
         {
+            public Matrix4x4 View;
             public Matrix4x4 ViewProj;
             public Matrix4x4 InvViewProj;
             public Vector3 Position;
@@ -423,7 +424,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
                         _lightsPending = false;
                     }
 
-                    if (_gpuScene.Sync(Scene))
+                    if (_gpuScene.Sync(Scene, CameraHost?.ViewMeshes))
                         _tracer.Restart();
 
                     _tracer.Bounces = Bounces;
@@ -462,6 +463,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
 
             CameraPose pose = new CameraPose
             {
+                View = ToNumerics(view),
                 ViewProj = ToNumerics(viewProj),
                 InvViewProj = ToNumerics(Matrix4.Invert(viewProj)),
                 Position = new Vector3(-location.Y, location.Z, -location.X),
@@ -504,11 +506,43 @@ namespace CSharp3D.Forms.Vulkan.Controls
             bool active = StepCamera(delta);
             PushCamera();
 
+            // The host redraws its guides for the new camera (handles size themselves by
+            // their distance from the eye); pick them up without a full scene sync.
+            SyncOverlaysOnly();
+
             if (!active)
             {
                 _pump.Stop();
                 _lastPumpSeconds = 0;
             }
+        }
+
+        /// <summary>Gather the overlays alone - cheap - and ask for a frame if they changed. UI thread.</summary>
+        private void SyncOverlaysOnly()
+        {
+            if (_tracer == null || Scene == null)
+                return;
+
+            bool changed;
+
+            try
+            {
+                lock (_gate)
+                {
+                    if (_gpuScene == null)
+                        return;
+
+                    changed = _gpuScene.SyncOverlays(Scene, CameraHost?.ViewMeshes);
+                }
+            }
+            catch (Exception ex)
+            {
+                Fail(ex);
+                return;
+            }
+
+            if (changed)
+                RequestFrame();
         }
 
         private void EnsurePumping()
@@ -609,7 +643,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
                             _tracer.SamplesPerFrame = _samplesPerFrame;
 
                             frameClock.Restart();
-                            bool ok = _tracer.Render(_swapchain, pose.ViewProj, pose.InvViewProj, pose.Position, delta);
+                            bool ok = _tracer.Render(_swapchain, pose.View, pose.ViewProj, pose.InvViewProj, pose.Position, delta);
                             frameClock.Stop();
 
                             if (!ok)

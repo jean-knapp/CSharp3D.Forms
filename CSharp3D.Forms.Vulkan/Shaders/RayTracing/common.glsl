@@ -68,7 +68,7 @@ struct FrameData
     vec4 sky;                 // rgb sky radiance (skylight colour x intensity), w unused
     uvec4 counts;             // x frame index (random seed; bit 0 is the history parity), y light count, z samples since the camera settled, w flags
     vec4 units;               // x world units per metre, y bounces, z max lights per sample, w samples per frame
-    vec4 history;             // x most history an indirect pixel keeps, y the same for direct, z w unused
+    vec4 history;             // x most history an indirect pixel keeps, y the same for direct, z 1 when the camera is still, w unused
 };
 
 const uint FRAME_RESET = 1u;   // the scene changed: no pixel may keep its history

@@ -25,7 +25,7 @@ layout(set = 0, binding = 2, rgba16f) uniform readonly image2D indirects[2];
 layout(set = 0, binding = 3, rgba16f) uniform image2D pingA;
 layout(set = 0, binding = 4, rgba16f) uniform image2D pingB;
 layout(set = 0, binding = 5, rgba16f) uniform readonly image2D directs[2];
-layout(set = 0, binding = 6, rgba16f) uniform readonly image2D albedos;
+layout(set = 0, binding = 6, rgba16f) uniform readonly image2D albedos[2];
 layout(set = 0, binding = 7, rgba32f) uniform writeonly image2D hdr;
 
 const uint SOURCE_HISTORY = 0u;   // the indirect image raygen wrote this frame
@@ -141,7 +141,7 @@ void composePass(ivec2 pixel)
     vec4 raw = imageLoad(indirects[push.parity], pixel);
     vec4 filtered = load(push.source, pixel);
     vec3 direct = imageLoad(directs[push.parity], pixel).rgb;
-    vec3 albedo = imageLoad(albedos, pixel).rgb;
+    vec3 albedo = imageLoad(albedos[push.parity], pixel).rgb;
 
     // The passes have already faded towards the raw value with the pixel's history.
     vec3 indirect = filtered.rgb;
@@ -152,7 +152,7 @@ void composePass(ivec2 pixel)
 void main()
 {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(albedos);
+    ivec2 size = imageSize(albedos[0]);
 
     if (pixel.x >= size.x || pixel.y >= size.y)
         return;

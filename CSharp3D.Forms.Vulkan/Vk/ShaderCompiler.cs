@@ -20,7 +20,7 @@ namespace CSharp3D.Forms.Vulkan.Vk
     /// </summary>
     public sealed unsafe class ShaderCompiler
     {
-        public enum Kind { RayGeneration, Miss, ClosestHit, AnyHit, Compute }
+        public enum Kind { RayGeneration, Miss, ClosestHit, AnyHit, Compute, Vertex, Fragment }
 
         /// <summary>Where the GLSL lives; the host sets this the way it sets Scene.ShaderDirectory.</summary>
         public static string ShaderDirectory = "resources/shaders/";
@@ -192,6 +192,8 @@ namespace CSharp3D.Forms.Vulkan.Vk
                 case Kind.Miss: return ShaderKind.MissShader;
                 case Kind.ClosestHit: return ShaderKind.ClosesthitShader;
                 case Kind.AnyHit: return ShaderKind.AnyhitShader;
+                case Kind.Vertex: return ShaderKind.VertexShader;
+                case Kind.Fragment: return ShaderKind.FragmentShader;
                 default: return ShaderKind.ComputeShader;
             }
         }

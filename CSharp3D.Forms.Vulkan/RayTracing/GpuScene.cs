@@ -141,9 +141,31 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         /// <summary>Replace the lights and the sky. Takes effect at the next sync.</summary>
         public void SetLights(GpuLight[] lights, Vector3 skyRadiance)
         {
-            _lights = lights ?? new GpuLight[0];
+            lights = lights ?? new GpuLight[0];
+
+            // The host sends the list on every refresh; only a different one is a change,
+            // since a change starts the whole picture over.
+            if (_lights != null && SkyRadiance == skyRadiance && SameLights(_lights, lights))
+                return;
+
+            _lights = lights;
             SkyRadiance = skyRadiance;
             _lightsDirty = true;
+        }
+
+        private static bool SameLights(GpuLight[] a, GpuLight[] b)
+        {
+            if (a.Length != b.Length)
+                return false;
+
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (a[i].PositionRadius != b[i].PositionRadius || a[i].DirectionCone != b[i].DirectionCone
+                    || a[i].Radiance != b[i].Radiance || a[i].Params != b[i].Params)
+                    return false;
+            }
+
+            return true;
         }
 
         // ==================== sync ====================
@@ -152,9 +174,30 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         /// Bring the GPU copy up to date. Returns true when anything changed that makes the
         /// frames accumulated so far wrong - which is any change at all.
         /// </summary>
-        public bool Sync(Scene scene)
+        /// <summary>The guides to draw over the picture, as last gathered. Never null.</summary>
+        public OverlaySet Overlays { get; private set; } = OverlaySet.Empty;
+
+        /// <summary>
+        /// Gather the overlays - the scene's line, box and icon meshes plus the view's own -
+        /// into a fresh snapshot. True when they differ from the last snapshot. An overlay
+        /// change never restarts the picture: the overlays sit on top of it.
+        /// </summary>
+        public bool SyncOverlays(Scene scene, IEnumerable<Mesh> viewMeshes)
+        {
+            OverlaySet built = OverlayGather.Build(scene?.Meshes, viewMeshes, TextureIndex, Overlays);
+
+            if (ReferenceEquals(built, Overlays))
+                return false;
+
+            Overlays = built;
+            return true;
+        }
+
+        public bool Sync(Scene scene, IEnumerable<Mesh> viewMeshes = null)
         {
             bool changed = false;
+
+            SyncOverlays(scene, viewMeshes);
 
             if (_lightsDirty)
             {

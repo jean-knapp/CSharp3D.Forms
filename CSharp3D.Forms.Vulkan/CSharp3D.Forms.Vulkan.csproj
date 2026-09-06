@@ -45,7 +45,33 @@
   <!-- GLSL deploys beside the GL renderer's, under Shaders\, which the IDE's build moves to
        resources\shaders. Compiled to SPIR-V on first use (see ShaderCompiler). -->
   <ItemGroup>
-    <None Include="Shaders\**\*.glsl;Shaders\**\*.rgen;Shaders\**\*.rmiss;Shaders\**\*.rchit;Shaders\**\*.comp">
+    <None Include="Shaders\**\*.glsl;Shaders\**\*.rgen;Shaders\**\*.rmiss;Shaders\**\*.rchit;Shaders\**\*.comp;Shaders\**\*.vert;Shaders\**\*.frag">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="Shaders\RayTracing\closesthit.rchit">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\RayTracing\common.glsl">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\RayTracing\denoise.comp">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\RayTracing\luminance.comp">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\RayTracing\miss.rmiss">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\RayTracing\raygen.rgen">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\RayTracing\shadow.rmiss">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\RayTracing\tonemap.comp">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

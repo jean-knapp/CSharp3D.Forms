@@ -114,6 +114,22 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         public uint Reset;
     }
 
+    /// <summary>Push constants of overlay.vert / overlay.frag. 128 bytes, the guaranteed minimum.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct OverlayPush
+    {
+        public Matrix4x4 ViewProj;
+        public Vector4 Right;
+        public Vector4 Up;
+        public Vector4 CameraPos;
+        public uint Parity;
+        public uint DepthMode;
+        public uint Dotted;
+        public uint Texture;
+
+        public const uint NoTexture = 0xFFFFFFFF;
+    }
+
     /// <summary>How the host wants a mesh treated by the ray tracer.</summary>
     public enum MeshClass
     {

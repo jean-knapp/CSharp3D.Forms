@@ -31,7 +31,7 @@ layout(set = 0, binding = 5, rgba32f) uniform image2D positions[2];   // xyz wor
 layout(set = 0, binding = 6, rgba16f) uniform image2D normals[2];     // xyz shading normal, w distance from the eye
 layout(set = 0, binding = 7, rgba16f) uniform image2D directs[2];     // rgb direct radiance (albedo in), a samples
 layout(set = 0, binding = 8, rgba16f) uniform image2D indirects[2];   // rgb indirect irradiance (albedo out), a samples
-layout(set = 0, binding = 9, rgba16f) uniform image2D albedos;        // rgb the first hit's albedo
+layout(set = 0, binding = 9, rgba16f) uniform image2D albedos[2];     // rgb mean albedo of the first hits, a samples
 
 layout(set = 0, binding = 10) uniform sampler2D textures[];
 
@@ -217,7 +217,8 @@ struct Surface
 // the lights (albedo in, or the sky when the ray leaves the world); `indirect` gets what it
 // receives from everything else (albedo out). The first sample of the frame also reports
 // the surface it found.
-void tracePath(vec3 origin, vec3 direction, float pixelSpread, inout uint seed, inout vec3 direct, inout vec3 indirect, inout Surface surface, bool describe)
+void tracePath(vec3 origin, vec3 direction, float pixelSpread, inout uint seed, inout vec3 direct, inout vec3 indirect,
+    inout vec3 albedoSum, inout float hits, inout Surface surface, bool describe)
 {
     uint bounces = uint(frame.units.y);
 
@@ -270,6 +271,12 @@ void tracePath(vec3 origin, vec3 direction, float pixelSpread, inout uint seed, 
         // sampler covers the stretch beyond what an isotropic level should absorb.
         float footprint = travelled * pixelSpread / max(abs(dot(n, direction)), 0.25);
         vec3 albedo = albedoOf(material, hit.uv, footprint, hit.uvDensity);
+
+        if (bounce == 0u)
+        {
+            albedoSum += albedo;
+            hits += 1.0;
+        }
 
         vec3 p = hit.position + hit.geometricNormal * (dot(hit.geometricNormal, n) > 0.0 ? RAY_EPSILON : -RAY_EPSILON);
         vec3 v = -direction;
@@ -335,6 +342,13 @@ bool findHistory(Surface surface, ivec2 pixel, ivec2 size, uint prev, out ivec2 
 {
     prevPixel = pixel;
 
+    // The camera has not moved: this pixel is the same pixel, whichever surface its
+    // jittered first sample landed on this time. Keeping the history regardless is what
+    // lets a pixel on an edge average the surfaces it straddles - antialiasing - instead
+    // of starting over every time the jitter crosses the edge.
+    if (frame.history.z > 0.5)
+        return true;
+
     if (!surface.hit)
     {
         // Sky: the same pixel, if it was sky too.
@@ -383,6 +397,8 @@ void main()
 
     vec3 direct = vec3(0.0);
     vec3 indirect = vec3(0.0);
+    vec3 albedoSum = vec3(0.0);
+    float hits = 0.0;
 
     Surface surface;
     surface.hit = false;
@@ -425,11 +441,16 @@ void main()
         near /= near.w;
         far /= far.w;
 
-        tracePath(near.xyz, normalize(far.xyz - near.xyz), pixelSpread, seed, direct, indirect, surface, s == 0u);
+        tracePath(near.xyz, normalize(far.xyz - near.xyz), pixelSpread, seed, direct, indirect, albedoSum, hits, surface, s == 0u);
     }
 
     direct /= float(spp);
     indirect /= float(spp);
+
+    // The albedo the indirect light is put back under: the mean over the samples that hit
+    // something, so a pixel half on the sky keeps the surface's albedo and the coverage
+    // lives in the indirect term alone.
+    vec3 albedo = hits > 0.0 ? albedoSum / hits : vec3(0.0);
 
     // Guard the average against a stray infinity from a degenerate ray.
     if (any(isnan(direct)) || any(isinf(direct)))
@@ -442,8 +463,10 @@ void main()
 
     float directCount = 0.0;
     float indirectCount = 0.0;
+    float albedoCount = 0.0;
     vec3 directHistory = vec3(0.0);
     vec3 indirectHistory = vec3(0.0);
+    vec3 albedoHistory = vec3(0.0);
 
     if ((frame.counts.w & FRAME_RESET) == 0u)
     {
@@ -453,13 +476,16 @@ void main()
         {
             vec4 oldDirect = imageLoad(directs[prev], prevPixel);
             vec4 oldIndirect = imageLoad(indirects[prev], prevPixel);
+            vec4 oldAlbedo = imageLoad(albedos[prev], prevPixel);
 
             // A moving camera caps the history so the picture can follow it; a still one
             // lets it grow, which is what converges.
             directCount = min(oldDirect.a, frame.history.y);
             indirectCount = min(oldIndirect.a, frame.history.x);
+            albedoCount = min(oldAlbedo.a, frame.history.x);
             directHistory = oldDirect.rgb;
             indirectHistory = oldIndirect.rgb;
+            albedoHistory = oldAlbedo.rgb;
         }
     }
 
@@ -468,13 +494,17 @@ void main()
     direct = (directHistory * directCount + direct * weight) / (directCount + weight);
     indirect = (indirectHistory * indirectCount + indirect * weight) / (indirectCount + weight);
 
+    if (albedoCount + hits > 0.0)
+        albedo = (albedoHistory * albedoCount + albedo * hits) / (albedoCount + hits);
+
     // Counts live in a 16-bit float: exact to 2048, and nothing past that matters.
     directCount = min(directCount + weight, 2048.0);
     indirectCount = min(indirectCount + weight, 2048.0);
+    albedoCount = min(albedoCount + hits, 2048.0);
 
     imageStore(positions[parity], pixel, vec4(surface.position, surface.hit ? 1.0 : 0.0));
     imageStore(normals[parity], pixel, vec4(surface.normal, surface.depth));
     imageStore(directs[parity], pixel, vec4(direct, directCount));
     imageStore(indirects[parity], pixel, vec4(indirect, indirectCount));
-    imageStore(albedos, pixel, vec4(surface.albedo, 1.0));
+    imageStore(albedos[parity], pixel, vec4(albedo, albedoCount));
 }
