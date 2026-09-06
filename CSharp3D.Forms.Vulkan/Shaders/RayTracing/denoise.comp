@@ -1,0 +1,158 @@
+#version 460
+
+// The denoiser, and the composition after it.
+//
+// The indirect light raygen stores is a Monte Carlo estimate: a few samples per pixel on a
+// frame that has just moved, thousands on one that has sat still. Until it has enough of
+// its own, a pixel borrows from its neighbours on the same surface - an edge-aware a-trous
+// filter, run a few times at growing step sizes, that stops at a change of normal or a step
+// out of the tangent plane so that light never bleeds round a corner. Neighbours that have
+// more history count for more, since their estimate is the better one.
+//
+// The composition puts the two halves together: direct light, which was clean to begin
+// with, plus the filtered indirect light under the surface's albedo. A pixel with a long
+// history of its own trusts its raw value over the filtered one, so a still view converges
+// to the exact answer rather than a blurred one.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D positions[2];
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D normals[2];
+layout(set = 0, binding = 2, rgba16f) uniform readonly image2D indirects[2];
+layout(set = 0, binding = 3, rgba16f) uniform image2D pingA;
+layout(set = 0, binding = 4, rgba16f) uniform image2D pingB;
+layout(set = 0, binding = 5, rgba16f) uniform readonly image2D directs[2];
+layout(set = 0, binding = 6, rgba16f) uniform readonly image2D albedos;
+layout(set = 0, binding = 7, rgba32f) uniform writeonly image2D hdr;
+
+const uint SOURCE_HISTORY = 0u;   // the indirect image raygen wrote this frame
+const uint SOURCE_A = 1u;
+const uint SOURCE_B = 2u;
+
+const uint MODE_FILTER = 0u;
+const uint MODE_COMPOSE = 1u;
+
+layout(push_constant) uniform Push
+{
+    uint parity;        // which history images are this frame's
+    uint source;        // SOURCE_*: what this pass reads
+    uint dest;          // SOURCE_A or SOURCE_B: what a filter pass writes
+    uint mode;          // MODE_*
+    int step;           // the a-trous spacing, in pixels: 1, 2, 4, 8
+    float historyFull;  // samples at which a pixel trusts itself completely
+    float pad0, pad1;
+} push;
+
+vec4 load(uint source, ivec2 p)
+{
+    if (source == SOURCE_A)
+        return imageLoad(pingA, p);
+
+    if (source == SOURCE_B)
+        return imageLoad(pingB, p);
+
+    return imageLoad(indirects[push.parity], p);
+}
+
+void store(uint dest, ivec2 p, vec4 value)
+{
+    if (dest == SOURCE_A)
+        imageStore(pingA, p, value);
+    else
+        imageStore(pingB, p, value);
+}
+
+// The 5-tap B3 spline the a-trous filter is built on.
+const float KERNEL[5] = float[5](1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0);
+
+void filterPass(ivec2 pixel, ivec2 size)
+{
+    vec4 centre = load(push.source, pixel);
+    vec4 position = imageLoad(positions[push.parity], pixel);
+
+    // Sky has nothing to smooth.
+    if (position.w < 0.5)
+    {
+        store(push.dest, pixel, centre);
+        return;
+    }
+
+    vec4 normal = imageLoad(normals[push.parity], pixel);
+    float depth = normal.w;
+
+    // Out of the tangent plane by more than a pixel's footprint is another surface.
+    float planeTolerance = 0.02 * depth + 0.5;
+
+    // Weight by history: an estimate of n samples has 1/n the variance.
+    float centreWeight = KERNEL[2] * KERNEL[2] * min(centre.a, 64.0);
+
+    vec3 sum = centre.rgb * centreWeight;
+    float weightSum = centreWeight;
+
+    for (int j = -2; j <= 2; j++)
+    {
+        for (int i = -2; i <= 2; i++)
+        {
+            if (i == 0 && j == 0)
+                continue;
+
+            ivec2 q = pixel + ivec2(i, j) * push.step;
+
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y)
+                continue;
+
+            vec4 otherPosition = imageLoad(positions[push.parity], q);
+
+            if (otherPosition.w < 0.5)
+                continue;
+
+            vec4 otherNormal = imageLoad(normals[push.parity], q);
+
+            float facing = max(dot(normal.xyz, otherNormal.xyz), 0.0);
+            float wNormal = facing * facing;
+            wNormal *= wNormal;
+            wNormal *= wNormal;
+            wNormal *= wNormal;   // ^16: a corner stops it, a curve does not
+
+            float plane = abs(dot(otherPosition.xyz - position.xyz, normal.xyz));
+            float wPlane = exp(-plane / planeTolerance);
+
+            vec4 other = load(push.source, q);
+
+            float w = KERNEL[i + 2] * KERNEL[j + 2] * wNormal * wPlane * min(other.a, 64.0);
+
+            sum += other.rgb * w;
+            weightSum += w;
+        }
+    }
+
+    store(push.dest, pixel, vec4(sum / max(weightSum, 1.0e-6), centre.a));
+}
+
+void composePass(ivec2 pixel)
+{
+    vec4 raw = imageLoad(indirects[push.parity], pixel);
+    vec4 filtered = load(push.source, pixel);
+    vec3 direct = imageLoad(directs[push.parity], pixel).rgb;
+    vec3 albedo = imageLoad(albedos, pixel).rgb;
+
+    // The longer a pixel's own history, the more of its own estimate it keeps.
+    float trust = clamp(raw.a / max(push.historyFull, 1.0), 0.0, 1.0);
+    vec3 indirect = mix(filtered.rgb, raw.rgb, trust);
+
+    imageStore(hdr, pixel, vec4(direct + albedo * indirect, 1.0));
+}
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(albedos);
+
+    if (pixel.x >= size.x || pixel.y >= size.y)
+        return;
+
+    if (push.mode == MODE_FILTER)
+        filterPass(pixel, size);
+    else
+        composePass(pixel);
+}

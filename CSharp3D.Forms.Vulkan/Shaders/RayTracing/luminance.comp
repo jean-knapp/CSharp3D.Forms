@@ -1,0 +1,79 @@
+#version 460
+
+// Auto exposure, the way Unreal's does it: the scene's average log luminance becomes an
+// EV100, clamped to the extended range the game enables, and the eye adapts towards it at
+// Unreal's default speeds (3 stops a second brightening, 1 darkening).
+//
+// One work group strides over the whole image; a few milliseconds, and it is the one place
+// the frame needs a total. The adapted value lives in the buffer between frames.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D hdr;
+
+layout(set = 0, binding = 1, std430) buffer Exposure
+{
+    float adaptedLogLum;   // log2 luminance the eye is currently adapted to
+    float exposure;        // the multiplier the tonemap applies
+    float pad0, pad1;
+};
+
+layout(push_constant) uniform Push
+{
+    float deltaSeconds;
+    float exposureBias;    // Unreal's Exposure Compensation, in stops
+    float minEV100;
+    float maxEV100;
+    uint reset;            // start adapted at the target rather than easing to it
+} push;
+
+shared float partial[256];
+
+void main()
+{
+    ivec2 size = imageSize(hdr);
+    uint total = uint(size.x * size.y);
+    uint id = gl_LocalInvocationID.x;
+
+    float sum = 0.0;
+    uint count = 0u;
+
+    for (uint i = id; i < total; i += 256u)
+    {
+        ivec2 pixel = ivec2(int(i % uint(size.x)), int(i / uint(size.x)));
+        vec3 c = imageLoad(hdr, pixel).rgb;
+        float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        sum += log2(max(lum, 1.0e-4));
+        count++;
+    }
+
+    partial[id] = sum;
+    barrier();
+
+    for (uint stride = 128u; stride > 0u; stride >>= 1u)
+    {
+        if (id < stride)
+            partial[id] += partial[id + stride];
+
+        barrier();
+    }
+
+    if (id == 0u)
+    {
+        float averageLogLum = partial[0] / float(max(total, 1u));
+
+        // Unreal's luminance-to-EV100 (ExposureCommon: log2(Lum * 100 / 12.5)), clamped to
+        // the range the auto exposure is allowed to reach.
+        float targetEV = clamp(averageLogLum + log2(100.0 / 12.5), push.minEV100, push.maxEV100);
+        float adapted = push.reset != 0u ? targetEV : adaptedLogLum;
+
+        // Adapt at Unreal's defaults: faster towards brighter, slower towards darker.
+        float speed = targetEV > adapted ? 3.0 : 1.0;
+        adapted += (targetEV - adapted) * (1.0 - exp(-push.deltaSeconds * speed));
+
+        adaptedLogLum = adapted;
+
+        // EV100 to a multiplier: 1 / (1.2 * 2^EV), with the compensation as extra stops.
+        exposure = 1.0 / (1.2 * exp2(adapted - push.exposureBias));
+    }
+}

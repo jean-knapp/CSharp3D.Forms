@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PlatformTarget>x64</PlatformTarget>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>CSharp3D.Forms.Vulkan</RootNamespace>
+    <AssemblyName>CSharp3D.Forms.Vulkan</AssemblyName>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Nullable>disable</Nullable>
+    <!-- The GL project it shares a scene model with is AnyCPU; this one binds a native RT
+         driver and is 64-bit only. Nothing 32-bit consumes it. -->
+    <ResolveAssemblyWarnOrErrorOnTargetArchitectureMismatch>None</ResolveAssemblyWarnOrErrorOnTargetArchitectureMismatch>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The scene model this reads is expressed in OpenTK vectors and matrices. Same version as
+         CSharp3D.Forms, which consumes it through packages.config. -->
+    <PackageReference Include="OpenTK" Version="3.3.3" />
+    <PackageReference Include="Silk.NET.Core" Version="2.23.0" />
+    <PackageReference Include="Silk.NET.Vulkan" Version="2.23.0" />
+    <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" Version="2.23.0" />
+    <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" Version="2.23.0" />
+    <PackageReference Include="Silk.NET.Shaderc" Version="2.23.0" />
+    <PackageReference Include="Silk.NET.Shaderc.Native" Version="2.23.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CSharp3D.Forms\CSharp3D.Forms.csproj" />
+  </ItemGroup>
+
+  <!-- shaderc's native library. Its package ships a props that should copy this, keyed on a
+       net461 build folder that an SDK-style net472 project does not pick up; copied by hand so
+       the compiler is beside the assembly that loads it. -->
+  <ItemGroup>
+    <None Include="$(NuGetPackageRoot)silk.net.shaderc.native/2.23.0/runtimes/win-x64/native/shaderc_shared.dll">
+      <Link>shaderc_shared.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <!-- GLSL deploys beside the GL renderer's, under Shaders\, which the IDE's build moves to
+       resources\shaders. Compiled to SPIR-V on first use (see ShaderCompiler). -->
+  <ItemGroup>
+    <None Include="Shaders\**\*.glsl;Shaders\**\*.rgen;Shaders\**\*.rmiss;Shaders\**\*.rchit;Shaders\**\*.comp">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
