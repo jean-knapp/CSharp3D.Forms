@@ -101,6 +101,11 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 AddressModeV = SamplerAddressMode.Repeat,
                 AddressModeW = SamplerAddressMode.Repeat,
                 MaxLod = 16,
+
+                // The device enables the feature; 8x is what Unreal's default texture group
+                // samples with.
+                AnisotropyEnable = true,
+                MaxAnisotropy = 8,
             };
 
             Sampler sampler;
@@ -472,7 +477,13 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             return index;
         }
 
-        /// <summary>A bitmap onto the card, in the BGRA order GDI+ hands over.</summary>
+        /// <summary>
+        /// A bitmap onto the card, in the BGRA order GDI+ hands over, with its full mip chain.
+        ///
+        /// Rays have no screen-space derivatives to pick a mip level from, so raygen picks
+        /// one from a ray cone; without the levels to pick from, every detailed texture
+        /// would alias at a distance until the accumulation had supersampled it away.
+        /// </summary>
         private Image Upload(Bitmap bitmap)
         {
             BitmapData data;
@@ -499,11 +510,16 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             bitmap.UnlockBits(data);
             staging.Write(pixels);
 
+            uint mipLevels = 1;
+
+            while ((Math.Max(width, height) >> (int)mipLevels) > 0)
+                mipLevels++;
+
             Image image = _device.CreateImage(width, height, Format.B8G8R8A8Unorm,
-                ImageUsageFlags.SampledBit | ImageUsageFlags.TransferDstBit);
+                ImageUsageFlags.SampledBit | ImageUsageFlags.TransferDstBit | ImageUsageFlags.TransferSrcBit, mipLevels);
 
             CommandBuffer cmd = _device.BeginOneShot();
-            _device.Transition(cmd, image, ImageLayout.TransferDstOptimal);
+            _device.Transition(cmd, image, ImageLayout.TransferDstOptimal, mipLevels);
 
             BufferImageCopy region = new BufferImageCopy
             {
@@ -513,11 +529,64 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             };
 
             _device.Api.CmdCopyBufferToImage(cmd, staging.Handle, image.Handle, ImageLayout.TransferDstOptimal, 1, &region);
-            _device.Transition(cmd, image, ImageLayout.ShaderReadOnlyOptimal);
+
+            // Each level is a linear downsample of the one above it.
+            int sourceWidth = (int)width;
+            int sourceHeight = (int)height;
+
+            for (uint level = 1; level < mipLevels; level++)
+            {
+                int targetWidth = Math.Max(1, sourceWidth / 2);
+                int targetHeight = Math.Max(1, sourceHeight / 2);
+
+                MipBarrier(cmd, image, level - 1, ImageLayout.TransferDstOptimal, ImageLayout.TransferSrcOptimal);
+
+                ImageBlit blit = new ImageBlit
+                {
+                    SrcSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, level - 1, 0, 1),
+                    DstSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, level, 0, 1),
+                };
+
+                blit.SrcOffsets[1] = new Offset3D(sourceWidth, sourceHeight, 1);
+                blit.DstOffsets[1] = new Offset3D(targetWidth, targetHeight, 1);
+
+                _device.Api.CmdBlitImage(cmd, image.Handle, ImageLayout.TransferSrcOptimal, image.Handle, ImageLayout.TransferDstOptimal,
+                    1, &blit, Filter.Linear);
+
+                MipBarrier(cmd, image, level - 1, ImageLayout.TransferSrcOptimal, ImageLayout.ShaderReadOnlyOptimal);
+
+                sourceWidth = targetWidth;
+                sourceHeight = targetHeight;
+            }
+
+            MipBarrier(cmd, image, mipLevels - 1, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal);
+            image.Layout = ImageLayout.ShaderReadOnlyOptimal;
+
             _device.EndOneShot(cmd);
 
             staging.Dispose();
             return image;
+        }
+
+        /// <summary>A layout transition of one mip level.</summary>
+        private void MipBarrier(CommandBuffer cmd, Image image, uint level, ImageLayout from, ImageLayout to)
+        {
+            ImageMemoryBarrier barrier = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                OldLayout = from,
+                NewLayout = to,
+                SrcQueueFamilyIndex = Silk.NET.Vulkan.Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Silk.NET.Vulkan.Vk.QueueFamilyIgnored,
+                Image = image.Handle,
+                SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, level, 1, 0, 1),
+                SrcAccessMask = AccessFlags.MemoryWriteBit | AccessFlags.MemoryReadBit,
+                DstAccessMask = AccessFlags.MemoryWriteBit | AccessFlags.MemoryReadBit,
+            };
+
+            _device.Api.CmdPipelineBarrier(cmd,
+                PipelineStageFlags.AllCommandsBit, PipelineStageFlags.AllCommandsBit,
+                0, 0, null, 0, null, 1, &barrier);
         }
 
         // ==================== acceleration structures ====================

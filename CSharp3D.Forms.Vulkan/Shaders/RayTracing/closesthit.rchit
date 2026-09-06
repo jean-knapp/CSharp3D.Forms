@@ -51,4 +51,18 @@ void main()
     hit.geometricNormal = normalize(vec3(objectFaceNormal * gl_WorldToObjectEXT));
     hit.uv = uv0 * weights.x + uv1 * weights.y + uv2 * weights.z;
     hit.materialIndex = geometry.materialIndex;
+
+    // How much texture a world unit covers here: the ratio of the triangle's area in uv
+    // space to its area in the world, square-rooted to a length. Raygen turns the width of
+    // its ray cone at the hit into texels with this (Akenine-Moller's ray cones).
+    vec3 w0 = vec3(gl_ObjectToWorldEXT * vec4(p0, 1.0));
+    vec3 w1 = vec3(gl_ObjectToWorldEXT * vec4(p1, 1.0));
+    vec3 w2 = vec3(gl_ObjectToWorldEXT * vec4(p2, 1.0));
+
+    float worldArea = length(cross(w1 - w0, w2 - w0));
+    vec2 e1 = uv1 - uv0;
+    vec2 e2 = uv2 - uv0;
+    float uvArea = abs(e1.x * e2.y - e1.y * e2.x);
+
+    hit.uvDensity = sqrt(uvArea / max(worldArea, 1.0e-8));
 }

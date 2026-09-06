@@ -85,6 +85,7 @@ struct HitPayload
     vec3 geometricNormal;     // face normal, world space, unit
     vec2 uv;
     uint materialIndex;
+    float uvDensity;          // texture-space length per world unit on the triangle, for the mip level
 };
 
 // ---- random --------------------------------------------------------------------------------
