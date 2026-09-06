@@ -175,7 +175,10 @@ namespace CSharp3D.Forms.Vulkan.Controls
                 lock (_gate)
                 {
                     if (_gpuScene != null)
+                    {
+                        _tracer?.WaitForGpu();
                         _gpuScene.Classifier = value ?? GpuScene.DefaultClassify;
+                    }
                 }
             }
         }
@@ -218,6 +221,9 @@ namespace CSharp3D.Forms.Vulkan.Controls
             if (_initialized)
                 return _tracer != null;
 
+            if (_permanentlyUnavailable)
+                return false;
+
             _initialized = true;
 
             try
@@ -243,15 +249,19 @@ namespace CSharp3D.Forms.Vulkan.Controls
             catch (VulkanUnavailableException ex)
             {
                 _status = ex.Message;
+                _permanentlyUnavailable = true;
             }
             catch (Exception ex)
             {
                 _status = "Ray tracing failed to start: " + ex.Message;
+                _permanentlyUnavailable = true;
             }
 
             TearDown();
             return false;
         }
+
+        private bool _permanentlyUnavailable;
 
         /// <summary>Stop the thread and let go of everything Vulkan. UI thread.</summary>
         private void TearDown()
@@ -270,15 +280,33 @@ namespace CSharp3D.Forms.Vulkan.Controls
 
             lock (_gate)
             {
-                _tracer?.Dispose();
-                _tracer = null;
-                _gpuScene?.Dispose();
-                _gpuScene = null;
-                _swapchain?.Dispose();
-                _swapchain = null;
+                // On a lost device any of these can throw; each is released on its own so
+                // that one failing does not keep the rest, and never lets an exception out
+                // of a teardown that may be running from a failure handler.
+                Release(ref _tracer);
+                Release(ref _gpuScene);
+                Release(ref _swapchain);
             }
 
             _stopping = false;
+
+            // A later paint may try again: a lost device is replaced by VulkanDevice.Shared.
+            _initialized = false;
+        }
+
+        private static void Release<T>(ref T resource) where T : class, IDisposable
+        {
+            T held = resource;
+            resource = null;
+
+            try
+            {
+                held?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                VulkanDevice.Stage("release failed: " + ex.Message);
+            }
         }
 
         protected override void Dispose(bool disposing)
@@ -385,6 +413,9 @@ namespace CSharp3D.Forms.Vulkan.Controls
                         return;
 
                     FitSurface();
+
+                    // The frame in flight reads the buffers the sync may replace.
+                    _tracer.WaitForGpu();
 
                     if (_lightsPending)
                     {
@@ -598,7 +629,9 @@ namespace CSharp3D.Forms.Vulkan.Controls
                 }
                 catch (Exception ex)
                 {
-                    _status = "Ray tracing stopped: " + ex.GetType().Name + ": " + ex.Message;
+                    _status = ex.Message.Contains("DeviceLost")
+                        ? "The GPU reset (device lost). Pick the mode again to restart ray tracing."
+                        : "Ray tracing stopped: " + ex.GetType().Name + ": " + ex.Message;
                     VulkanDevice.Stage("frame failed: " + ex);
                     FailFromThread();
                     break;

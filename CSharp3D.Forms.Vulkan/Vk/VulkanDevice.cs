@@ -33,12 +33,31 @@ namespace CSharp3D.Forms.Vulkan.Vk
             {
                 lock (_sharedGate)
                 {
+                    // A device the driver has lost never comes back; a fresh one does.
+                    if (_shared != null && _shared.IsLost)
+                    {
+                        try { _shared.Dispose(); } catch (Exception) { }
+                        _shared = null;
+                    }
+
                     if (_shared == null)
                         _shared = new VulkanDevice();
 
                     return _shared;
                 }
             }
+        }
+
+        /// <summary>
+        /// Set once any call reports VK_ERROR_DEVICE_LOST. Nothing on the device works after
+        /// that; whoever holds it releases what it can and asks <see cref="Shared"/> again.
+        /// </summary>
+        public bool IsLost { get; private set; }
+
+        /// <summary>Forget the shared device without touching it: for a host that knows it is gone.</summary>
+        public void MarkLost()
+        {
+            IsLost = true;
         }
 
         public Silk.NET.Vulkan.Vk Api { get; }
@@ -789,8 +808,13 @@ namespace CSharp3D.Forms.Vulkan.Vk
 
         public static void Check(Result result, string what)
         {
-            if (result != Result.Success)
-                throw new VulkanException(what + " failed: " + result);
+            if (result == Result.Success)
+                return;
+
+            if (result == Result.ErrorDeviceLost)
+                _shared?.MarkLost();
+
+            throw new VulkanException(what + " failed: " + result);
         }
 
         public void Dispose()

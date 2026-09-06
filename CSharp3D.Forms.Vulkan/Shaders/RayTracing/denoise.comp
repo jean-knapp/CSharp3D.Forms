@@ -9,10 +9,13 @@
 // out of the tangent plane so that light never bleeds round a corner. Neighbours that have
 // more history count for more, since their estimate is the better one.
 //
+// Every pass keeps a share of the pixel's own value that grows with its history, so the
+// smoothing fades out continuously as a still view converges - never in steps that would
+// show as the picture changing after the camera stops - and a fully converged pixel is
+// left exactly as it is.
+//
 // The composition puts the two halves together: direct light, which was clean to begin
-// with, plus the filtered indirect light under the surface's albedo. A pixel with a long
-// history of its own trusts its raw value over the filtered one, so a still view converges
-// to the exact answer rather than a blurred one.
+// with, plus the filtered indirect light under the surface's albedo.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -84,7 +87,7 @@ void filterPass(ivec2 pixel, ivec2 size)
     float planeTolerance = 0.02 * depth + 0.5;
 
     // Weight by history: an estimate of n samples has 1/n the variance.
-    float centreWeight = KERNEL[2] * KERNEL[2] * min(centre.a, 64.0);
+    float centreWeight = KERNEL[2] * KERNEL[2] * min(centre.a, 256.0);
 
     vec3 sum = centre.rgb * centreWeight;
     float weightSum = centreWeight;
@@ -119,14 +122,18 @@ void filterPass(ivec2 pixel, ivec2 size)
 
             vec4 other = load(push.source, q);
 
-            float w = KERNEL[i + 2] * KERNEL[j + 2] * wNormal * wPlane * min(other.a, 64.0);
+            float w = KERNEL[i + 2] * KERNEL[j + 2] * wNormal * wPlane * min(other.a, 256.0);
 
             sum += other.rgb * w;
             weightSum += w;
         }
     }
 
-    store(push.dest, pixel, vec4(sum / max(weightSum, 1.0e-6), centre.a));
+    // The longer the pixel's own history, the more of its own estimate it keeps.
+    float trust = clamp(centre.a / max(push.historyFull, 1.0), 0.0, 1.0);
+    vec3 filtered = mix(sum / max(weightSum, 1.0e-6), centre.rgb, trust);
+
+    store(push.dest, pixel, vec4(filtered, centre.a));
 }
 
 void composePass(ivec2 pixel)
@@ -136,9 +143,8 @@ void composePass(ivec2 pixel)
     vec3 direct = imageLoad(directs[push.parity], pixel).rgb;
     vec3 albedo = imageLoad(albedos, pixel).rgb;
 
-    // The longer a pixel's own history, the more of its own estimate it keeps.
-    float trust = clamp(raw.a / max(push.historyFull, 1.0), 0.0, 1.0);
-    vec3 indirect = mix(filtered.rgb, raw.rgb, trust);
+    // The passes have already faded towards the raw value with the pixel's history.
+    vec3 indirect = filtered.rgb;
 
     imageStore(hdr, pixel, vec4(direct + albedo * indirect, 1.0));
 }

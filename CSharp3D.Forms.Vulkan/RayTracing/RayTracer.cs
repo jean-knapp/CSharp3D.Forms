@@ -31,8 +31,8 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
     {
         private const int MaxTextures = 4096;
 
-        /// <summary>Samples a pixel needs of its own before the composition stops smoothing it.</summary>
-        private const float HistoryFull = 256f;
+        /// <summary>Samples a pixel needs of its own before the smoothing leaves it alone entirely.</summary>
+        private const float HistoryFull = 1024f;
 
         /// <summary>How much history a pixel keeps through a camera move. Short enough to follow the picture.</summary>
         private const float MovingHistoryIndirect = 24f;
@@ -769,6 +769,17 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             _albedo = _pingA = _pingB = _hdr = _ldr = null;
         }
 
+        /// <summary>
+        /// Block until the frame in flight has finished on the GPU. Anything that replaces
+        /// what a frame reads - the scene's buffers and acceleration structures, the light
+        /// list - has to call this first, or the GPU traces memory that is being freed under
+        /// it and the device is lost.
+        /// </summary>
+        public void WaitForGpu()
+        {
+            WaitForFrame();
+        }
+
         private void WaitForFrame()
         {
             if (!_fenceInUse)
@@ -872,16 +883,13 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         }
 
         /// <summary>
-        /// How many smoothing passes the indirect light gets: four while the picture has just
-        /// changed, none once it has enough samples to stand on its own.
+        /// How many smoothing passes the indirect light gets. The passes themselves fade per
+        /// pixel as its history grows (denoise.comp), so the count only drops once every
+        /// pixel has enough history for the passes to do nothing.
         /// </summary>
         private int DenoisePasses()
         {
-            if (Samples < 8) return 4;
-            if (Samples < 32) return 3;
-            if (Samples < 128) return 2;
-            if (Samples < 512) return 1;
-            return 0;
+            return Samples < (uint)HistoryFull ? 4 : 0;
         }
 
         private void Record(Silk.NET.Vulkan.Image target, double deltaSeconds)
