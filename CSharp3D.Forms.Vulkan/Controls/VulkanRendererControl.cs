@@ -9,6 +9,7 @@ using System.Windows.Forms;
 using CSharp3D.Forms.Cameras;
 using CSharp3D.Forms.Controls;
 using CSharp3D.Forms.Engine;
+using CSharp3D.Forms.Lights;
 using CSharp3D.Forms.Meshes;
 using CSharp3D.Forms.Vulkan.RayTracing;
 using CSharp3D.Forms.Vulkan.Vk;
@@ -106,10 +107,53 @@ namespace CSharp3D.Forms.Vulkan.Controls
 
         /// <summary>
         /// The GL view the camera does its arithmetic against. Must have this view's bounds:
-        /// in the editor that is the perspective pane this control is placed over.
+        /// in the editor that is the perspective pane this control is placed over. Left
+        /// unset, the view keeps a hidden one of its own at its own size.
         /// </summary>
         [Browsable(false)]
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public RendererControl CameraHost { get; set; }
+
+        private RendererControl _ownHost;
+
+        /// <summary>The host the camera is given: the one set, or this view's own hidden one.</summary>
+        private RendererControl EffectiveHost
+        {
+            get
+            {
+                if (CameraHost != null)
+                    return CameraHost;
+
+                if (_ownHost == null)
+                {
+                    // Hidden, so it never paints; it exists for its bounds and its screen
+                    // position, which is all the camera classes read.
+                    _ownHost = new RendererControl { Visible = false, Bounds = ClientRectangle };
+                    Controls.Add(_ownHost);
+                }
+
+                _ownHost.Scene = Scene;
+                _ownHost.Camera = Camera;
+
+                if (_ownHost.Bounds != ClientRectangle)
+                    _ownHost.Bounds = ClientRectangle;
+
+                return _ownHost;
+            }
+        }
+
+        /// <summary>
+        /// Take the lights from the scene - its point lights, its sun, its ambient colour -
+        /// until a host supplies its own through <see cref="SetLights"/>. A generic scene
+        /// has no game to calibrate against, so a point light's intensity over its
+        /// quadratic term is used as its radiance and the auto exposure does the rest.
+        /// </summary>
+        [Category("Renderer")]
+        public bool UseSceneLights { get; set; } = true;
+
+        /// <summary>World units in a metre, for the inverse-square falloff. Lambda Engine: 1 unit = 1.905 cm.</summary>
+        [Category("Renderer")]
+        public float UnitsPerMetre { get; set; } = 100f / 1.905f;
 
         [Category("Renderer")]
         public event EventHandler<EventArgs> CameraMove;
@@ -141,6 +185,18 @@ namespace CSharp3D.Forms.Vulkan.Controls
         /// <summary>Unreal's exposure compensation, in stops.</summary>
         [Category("Renderer")]
         public float ExposureBias { get; set; } = 0f;
+
+        /// <summary>
+        /// Adapt the exposure to the picture (Unreal's auto exposure), or hold it at
+        /// <see cref="FixedEV100"/> as Unreal does with auto exposure disabled. A fixed
+        /// exposure is the one that shows a brighter light as a brighter picture.
+        /// </summary>
+        [Category("Renderer")]
+        public bool AutoExposure { get; set; } = true;
+
+        /// <summary>The EV100 of a fixed exposure. Unreal with auto exposure off: a white point of 1, exposure 1.</summary>
+        [Category("Renderer")]
+        public float FixedEV100 { get; set; } = RayTracer.UnrealFixedEV100;
 
         /// <summary>Whether Vulkan ray tracing came up. False until the first paint, and after a failure.</summary>
         [Browsable(false)]
@@ -200,10 +256,77 @@ namespace CSharp3D.Forms.Vulkan.Controls
         /// <summary>The lights to trace with, and the sky's radiance. Takes effect on the next frame.</summary>
         public void SetLights(GpuLight[] lights, Vector3 skyRadiance)
         {
+            UseSceneLights = false;
             _pendingLights = lights ?? new GpuLight[0];
             _pendingSky = skyRadiance;
             _lightsPending = true;
             Invalidate();
+        }
+
+        private static Vector3 ToGl(LocationVector v)
+        {
+            return new Vector3(-v.Y, v.Z, -v.X);
+        }
+
+        private static Vector3 Linear(Color colour)
+        {
+            return new Vector3(colour.R / 255f, colour.G / 255f, colour.B / 255f);
+        }
+
+        /// <summary>The scene's own lights, in the ray tracer's terms.</summary>
+        private GpuLight[] LightsFromScene(out Vector3 sky)
+        {
+            List<GpuLight> lights = new List<GpuLight>();
+            sky = Vector3.Zero;
+
+            Scene scene = Scene;
+
+            if (scene == null)
+                return lights.ToArray();
+
+            sky = Linear(scene.AmbientColor) * Math.Max(0f, scene.AmbientIntensity);
+
+            if (scene.Lights != null)
+            {
+                foreach (PointLight light in scene.Lights)
+                {
+                    if (light == null)
+                        continue;
+
+                    // GL: intensity / (constant + linear d + quadratic d^2). The inverse-square
+                    // part is what the tracer models; the rest only shifts the brightness,
+                    // which the exposure takes back out.
+                    float scale = light.Intensity / Math.Max(light.Quadratic, 1e-4f);
+
+                    lights.Add(new GpuLight
+                    {
+                        PositionRadius = new Vector4(ToGl(light.Location), 1.0e6f),
+                        DirectionCone = new Vector4(0f, 0f, -1f, -1f),
+                        Radiance = new Vector4(Linear(light.Color) * scale, 0f),
+                        Params = new Vector4(-1f, GpuLight.TypePoint, 0f, 0f),
+                    });
+                }
+            }
+
+            if (scene.Sun != null && scene.Sun.Intensity > 0f)
+            {
+                Vector3 direction = ToGl(scene.Sun.Direction);
+
+                if (direction.LengthSquared() > 1e-8f)
+                {
+                    direction = Vector3.Normalize(direction);
+
+                    lights.Add(new GpuLight
+                    {
+                        PositionRadius = Vector4.Zero,
+                        DirectionCone = new Vector4(direction, 0f),
+                        Radiance = new Vector4(Linear(scene.Sun.Color) * scene.Sun.Intensity, 0f),
+                        Params = new Vector4(0f, GpuLight.TypeSun, 0f, 0f),
+                    });
+                }
+            }
+
+            return lights.ToArray();
         }
 
         // ==================== capture ====================
@@ -236,7 +359,8 @@ namespace CSharp3D.Forms.Vulkan.Controls
                     VulkanDevice.Stage("swapchain surface created");
                     _gpuScene = new GpuScene(_device) { Classifier = _classifier ?? GpuScene.DefaultClassify };
                     VulkanDevice.Stage("gpu scene created");
-                    _tracer = new RayTracer(_device, _gpuScene, new ShaderCompiler());
+                    _tracer = new RayTracer(_device, _gpuScene, new ShaderCompiler(Scene?.ShaderDirectory));
+                    _tracer.UnitsPerMetre = UnitsPerMetre;
                     VulkanDevice.Stage("ray tracer ready");
                     _status = _device.DeviceName;
                 }
@@ -333,6 +457,9 @@ namespace CSharp3D.Forms.Vulkan.Controls
 
             _surfaceSize = ClientSize;
 
+            if (_ownHost != null)
+                _ownHost.Bounds = ClientRectangle;
+
             if (_tracer != null)
             {
                 try
@@ -418,6 +545,12 @@ namespace CSharp3D.Forms.Vulkan.Controls
                     // The frame in flight reads the buffers the sync may replace.
                     _tracer.WaitForGpu();
 
+                    if (UseSceneLights)
+                    {
+                        Vector3 sky;
+                        _gpuScene.SetLights(LightsFromScene(out sky), sky);
+                    }
+
                     if (_lightsPending)
                     {
                         _gpuScene.SetLights(_pendingLights, _pendingSky);
@@ -429,6 +562,9 @@ namespace CSharp3D.Forms.Vulkan.Controls
 
                     _tracer.Bounces = Bounces;
                     _tracer.ExposureBias = ExposureBias;
+                    _tracer.UnitsPerMetre = UnitsPerMetre;
+                    _tracer.AutoExposure = AutoExposure;
+                    _tracer.FixedEV100 = FixedEV100;
                 }
             }
             catch (Exception ex)
@@ -445,7 +581,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
         /// <summary>Hand the render thread the camera as it is now. UI thread.</summary>
         private void PushCamera()
         {
-            if (Camera == null || CameraHost == null || _tracer == null)
+            if (Camera == null || _tracer == null)
                 return;
 
             Size size = _surfaceSize;
@@ -453,7 +589,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
             if (size.Width <= 0 || size.Height <= 0)
                 return;
 
-            RendererControl host = CameraHost;
+            RendererControl host = EffectiveHost;
             Matrix4 view = Camera.GetViewMatrix(host);
             Matrix4 projection = Camera.GetProjectionMatrix(size.Width, size.Height);
             Matrix4 viewProj = view * projection;
@@ -495,7 +631,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
             double delta = _lastPumpSeconds > 0 ? now - _lastPumpSeconds : 0;
             _lastPumpSeconds = now;
 
-            if (Camera == null || CameraHost == null || !Visible)
+            if (Camera == null || !Visible)
             {
                 _pump.Stop();
                 return;
@@ -568,7 +704,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
             {
                 if ((_cameraButtonsDown & button) != 0 && (down & button) == 0)
                 {
-                    Camera.MouseUp(CameraHost, button);
+                    Camera.MouseUp(EffectiveHost, button);
                     _cameraButtonsDown &= ~button;
                 }
             }
@@ -588,7 +724,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
 
             if (free != null)
             {
-                free.Move(CameraHost, delta, w, a, s, d, space, shift);
+                free.Move(EffectiveHost, delta, w, a, s, d, space, shift);
 
                 if (w || a || s || d || space || shift)
                 {
@@ -763,9 +899,9 @@ namespace CSharp3D.Forms.Vulkan.Controls
         {
             FocusRenderSurface();
 
-            if (Camera != null && CameraHost != null && (CameraMouseButtons & e.Button) != 0)
+            if (Camera != null && (CameraMouseButtons & e.Button) != 0)
             {
-                Camera.MouseDown(CameraHost, e.Button);
+                Camera.MouseDown(EffectiveHost, e.Button);
                 _cameraButtonsDown |= e.Button;
                 EnsurePumping();
             }
@@ -775,9 +911,9 @@ namespace CSharp3D.Forms.Vulkan.Controls
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
-            if (Camera != null && CameraHost != null && (_cameraButtonsDown & e.Button) != 0)
+            if (Camera != null && (_cameraButtonsDown & e.Button) != 0)
             {
-                Camera.MouseUp(CameraHost, e.Button);
+                Camera.MouseUp(EffectiveHost, e.Button);
                 _cameraButtonsDown &= ~e.Button;
                 PushCamera();
             }
@@ -787,9 +923,9 @@ namespace CSharp3D.Forms.Vulkan.Controls
 
         protected override void OnMouseWheel(MouseEventArgs e)
         {
-            if (Camera != null && CameraHost != null)
+            if (Camera != null)
             {
-                Camera.MouseWheel(CameraHost, e);
+                Camera.MouseWheel(EffectiveHost, e);
                 CameraMove?.Invoke(this, EventArgs.Empty);
                 PushCamera();
             }
@@ -801,9 +937,9 @@ namespace CSharp3D.Forms.Vulkan.Controls
         {
             _keysDown[e.KeyCode] = true;
 
-            if (Camera != null && CameraHost != null)
+            if (Camera != null)
             {
-                Camera.KeyDown(CameraHost, e.KeyCode);
+                Camera.KeyDown(EffectiveHost, e.KeyCode);
                 EnsurePumping();
             }
 

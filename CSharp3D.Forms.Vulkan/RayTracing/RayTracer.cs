@@ -53,6 +53,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         private PipelineLayout _overlayPipelineLayout;
         private Pipeline _overlayLinePipeline;
         private Pipeline _overlayTrianglePipeline;
+        private Pipeline _overlayCulledPipeline;
         private RenderPass _overlayRenderPass;
         private Framebuffer _overlayFramebuffer;
         private DescriptorSet _overlaySet;
@@ -127,6 +128,21 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
         /// <summary>Unreal's Exposure Compensation, in stops. Lambda Engine ships at 0.</summary>
         public float ExposureBias { get; set; } = 0f;
+
+        /// <summary>
+        /// Adapt the exposure to the picture, as Unreal's auto exposure does; or hold it at
+        /// <see cref="FixedEV100"/>, as Unreal does with auto exposure disabled.
+        /// </summary>
+        public bool AutoExposure { get; set; } = true;
+
+        /// <summary>
+        /// The EV100 a fixed exposure sits at. Unreal with auto exposure off pins both ends of
+        /// its range at a white point luminance of 1 (SceneView.cpp: LuminanceToEV100(1.2, 1)),
+        /// which is an exposure of exactly 1: scene luminance goes to the tonemapper as it is.
+        /// </summary>
+        public float FixedEV100 { get; set; } = UnrealFixedEV100;
+
+        public static readonly float UnrealFixedEV100 = (float)Math.Log(1.0 / 1.2, 2.0);
 
         /// <summary>World units in a metre. Lambda Engine: 1 unit = 1.905 cm.</summary>
         public float UnitsPerMetre { get; set; } = 100f / 1.905f;
@@ -577,13 +593,21 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                         PDynamicStates = pDynamic,
                     };
 
-                    foreach (PrimitiveTopology topology in new[] { PrimitiveTopology.LineList, PrimitiveTopology.TriangleList })
+                    // Lines, triangles both-sided (icons), and triangles with their back faces
+                    // dropped (boxes). The vertex shader flips y for Vulkan, which turns GL's
+                    // counter-clockwise front faces clockwise on screen.
+                    for (int variant = 0; variant < 3; variant++)
                     {
+                        PrimitiveTopology topology = variant == 0 ? PrimitiveTopology.LineList : PrimitiveTopology.TriangleList;
+
                         PipelineInputAssemblyStateCreateInfo assembly = new PipelineInputAssemblyStateCreateInfo
                         {
                             SType = StructureType.PipelineInputAssemblyStateCreateInfo,
                             Topology = topology,
                         };
+
+                        rasterization.CullMode = variant == 2 ? CullModeFlags.BackBit : CullModeFlags.None;
+                        rasterization.FrontFace = FrontFace.CounterClockwise;
 
                         GraphicsPipelineCreateInfo info = new GraphicsPipelineCreateInfo
                         {
@@ -606,10 +630,12 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                         VulkanDevice.Check(vk.CreateGraphicsPipelines(_device.Device, default(PipelineCache), 1, &info, null, &pipeline),
                             "vkCreateGraphicsPipelines");
 
-                        if (topology == PrimitiveTopology.LineList)
+                        if (variant == 0)
                             _overlayLinePipeline = pipeline;
-                        else
+                        else if (variant == 1)
                             _overlayTrianglePipeline = pipeline;
+                        else
+                            _overlayCulledPipeline = pipeline;
                     }
                 }
             }
@@ -1265,18 +1291,20 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             DescriptorSet set = _overlaySet;
             vk.CmdBindDescriptorSets(_cmd, PipelineBindPoint.Graphics, _overlayPipelineLayout, 0, 1, &set, 0, null);
 
-            OverlayTopology? bound = null;
+            Pipeline bound = default;
 
             foreach (OverlayBatch batch in _overlayBatches)
             {
                 if (batch.VertexCount == 0)
                     continue;
 
-                if (bound != batch.Topology)
+                Pipeline wanted = batch.Topology == OverlayTopology.Lines ? _overlayLinePipeline
+                    : batch.CullBackFaces ? _overlayCulledPipeline : _overlayTrianglePipeline;
+
+                if (bound.Handle != wanted.Handle)
                 {
-                    vk.CmdBindPipeline(_cmd, PipelineBindPoint.Graphics,
-                        batch.Topology == OverlayTopology.Lines ? _overlayLinePipeline : _overlayTrianglePipeline);
-                    bound = batch.Topology;
+                    vk.CmdBindPipeline(_cmd, PipelineBindPoint.Graphics, wanted);
+                    bound = wanted;
                 }
 
                 OverlayPush push = new OverlayPush
@@ -1423,6 +1451,8 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                     MinEV100 = -10f,
                     MaxEV100 = 20f,
                     Reset = _exposureReset ? 1u : 0u,
+                    FixedExposure = AutoExposure ? 0u : 1u,
+                    FixedEV100 = FixedEV100,
                 };
 
                 vk.CmdPushConstants(_cmd, _luminancePipelineLayout, ShaderStageFlags.ComputeBit, 0, (uint)sizeof(ExposurePush), &push);
@@ -1575,6 +1605,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
             if (_overlayLinePipeline.Handle != 0) vk.DestroyPipeline(_device.Device, _overlayLinePipeline, null);
             if (_overlayTrianglePipeline.Handle != 0) vk.DestroyPipeline(_device.Device, _overlayTrianglePipeline, null);
+            if (_overlayCulledPipeline.Handle != 0) vk.DestroyPipeline(_device.Device, _overlayCulledPipeline, null);
             if (_overlayPipelineLayout.Handle != 0) vk.DestroyPipelineLayout(_device.Device, _overlayPipelineLayout, null);
             if (_overlayRenderPass.Handle != 0) vk.DestroyRenderPass(_device.Device, _overlayRenderPass, null);
             if (_overlaySetLayout.Handle != 0) vk.DestroyDescriptorSetLayout(_device.Device, _overlaySetLayout, null);

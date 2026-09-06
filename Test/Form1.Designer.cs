@@ -46,6 +46,7 @@
             this.pointLight1 = new CSharp3D.Forms.Lights.PointLight();
             this.pointLight2 = new CSharp3D.Forms.Lights.PointLight();
             this.pointLight3 = new CSharp3D.Forms.Lights.PointLight();
+            this.vulkanRendererControl1 = new CSharp3D.Forms.Vulkan.Controls.VulkanRendererControl();
             ((System.ComponentModel.ISupportInitialize)(this.gridMesh1)).BeginInit();
             ((System.ComponentModel.ISupportInitialize)(this.floorMesh)).BeginInit();
             ((System.ComponentModel.ISupportInitialize)(this.northWallMesh)).BeginInit();
@@ -62,12 +63,17 @@
             this.rendererControl1.AutoInvalidate = true;
             this.rendererControl1.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(64)))), ((int)(((byte)(64)))), ((int)(((byte)(64)))));
             this.rendererControl1.Camera = this.orbitalCamera1;
-            this.rendererControl1.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.rendererControl1.CameraMouseButtons = ((System.Windows.Forms.MouseButtons)(((System.Windows.Forms.MouseButtons.Left | System.Windows.Forms.MouseButtons.Right) 
+            | System.Windows.Forms.MouseButtons.Middle)));
+            this.rendererControl1.Dock = System.Windows.Forms.DockStyle.Left;
+            this.rendererControl1.DrawMode = CSharp3D.Forms.Meshes.MeshDrawMode.Textured;
+            this.rendererControl1.FocusOnHover = false;
             this.rendererControl1.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(64)))), ((int)(((byte)(64)))), ((int)(((byte)(64)))));
+            this.rendererControl1.FrustumCulling = true;
             this.rendererControl1.Location = new System.Drawing.Point(0, 0);
             this.rendererControl1.Name = "rendererControl1";
             this.rendererControl1.Scene = this.scene1;
-            this.rendererControl1.Size = new System.Drawing.Size(800, 450);
+            this.rendererControl1.Size = new System.Drawing.Size(386, 450);
             this.rendererControl1.TabIndex = 0;
             // 
             // orbitalCamera1
@@ -83,7 +89,9 @@
             // 
             this.scene1.AmbientColor = System.Drawing.Color.White;
             this.scene1.AmbientIntensity = 0.2F;
+            this.scene1.FullBright = false;
             this.scene1.ShaderDirectory = "shaders/";
+            this.scene1.Sun = null;
             // 
             // textureUp
             // 
@@ -92,67 +100,96 @@
             // gridMesh1
             // 
             this.gridMesh1.Clickable = false;
+            this.gridMesh1.DepthMode = CSharp3D.Forms.Meshes.MeshDepthMode.Normal;
+            this.gridMesh1.Dotted = false;
+            this.gridMesh1.DottedInPerspective = false;
+            this.gridMesh1.ForceFullBright = false;
             this.gridMesh1.LineInterval = 1F;
+            this.gridMesh1.LineWidth = 1F;
             this.gridMesh1.Location = ((CSharp3D.Forms.Engine.LocationVector)(resources.GetObject("gridMesh1.Location")));
+            this.gridMesh1.NeedsVertexUpdate = false;
             this.gridMesh1.Rotation = ((CSharp3D.Forms.Engine.RotationVector)(resources.GetObject("gridMesh1.Rotation")));
             this.gridMesh1.Scene = this.scene1;
             this.gridMesh1.Size = 4F;
+            this.gridMesh1.StippleFactor = 2;
+            this.gridMesh1.StipplePattern = ((short)(-21846));
             this.gridMesh1.Vertices = new CSharp3D.Forms.Engine.LocationVector[0];
+            this.gridMesh1.ViewFilter = CSharp3D.Forms.Meshes.MeshViewFilter.All;
             // 
             // floorMesh
             // 
             this.floorMesh.Clickable = false;
+            this.floorMesh.DepthMode = CSharp3D.Forms.Meshes.MeshDepthMode.Normal;
+            this.floorMesh.ForceFullBright = false;
             this.floorMesh.Location = ((CSharp3D.Forms.Engine.LocationVector)(resources.GetObject("floorMesh.Location")));
             this.floorMesh.Material = null;
+            this.floorMesh.NeedsVertexUpdate = false;
             this.floorMesh.Rotation = ((CSharp3D.Forms.Engine.RotationVector)(resources.GetObject("floorMesh.Rotation")));
             this.floorMesh.ScaleX = 8F;
             this.floorMesh.ScaleY = 8F;
             this.floorMesh.ScaleZ = 1F;
             this.floorMesh.Scene = this.scene1;
+            this.floorMesh.ViewFilter = CSharp3D.Forms.Meshes.MeshViewFilter.All;
             // 
             // northWallMesh
             // 
             this.northWallMesh.Clickable = false;
+            this.northWallMesh.DepthMode = CSharp3D.Forms.Meshes.MeshDepthMode.Normal;
+            this.northWallMesh.ForceFullBright = false;
             this.northWallMesh.Location = ((CSharp3D.Forms.Engine.LocationVector)(resources.GetObject("northWallMesh.Location")));
             this.northWallMesh.Material = null;
+            this.northWallMesh.NeedsVertexUpdate = false;
             this.northWallMesh.Rotation = ((CSharp3D.Forms.Engine.RotationVector)(resources.GetObject("northWallMesh.Rotation")));
             this.northWallMesh.ScaleX = 8F;
             this.northWallMesh.ScaleY = 1F;
             this.northWallMesh.ScaleZ = 4F;
             this.northWallMesh.Scene = this.scene1;
+            this.northWallMesh.ViewFilter = CSharp3D.Forms.Meshes.MeshViewFilter.All;
             // 
             // eastWall
             // 
             this.eastWall.Clickable = false;
+            this.eastWall.DepthMode = CSharp3D.Forms.Meshes.MeshDepthMode.Normal;
+            this.eastWall.ForceFullBright = false;
             this.eastWall.Location = ((CSharp3D.Forms.Engine.LocationVector)(resources.GetObject("eastWall.Location")));
             this.eastWall.Material = null;
+            this.eastWall.NeedsVertexUpdate = false;
             this.eastWall.Rotation = ((CSharp3D.Forms.Engine.RotationVector)(resources.GetObject("eastWall.Rotation")));
             this.eastWall.ScaleX = 1F;
             this.eastWall.ScaleY = 8F;
             this.eastWall.ScaleZ = 4F;
             this.eastWall.Scene = this.scene1;
+            this.eastWall.ViewFilter = CSharp3D.Forms.Meshes.MeshViewFilter.All;
             // 
             // southWall
             // 
             this.southWall.Clickable = false;
+            this.southWall.DepthMode = CSharp3D.Forms.Meshes.MeshDepthMode.Normal;
+            this.southWall.ForceFullBright = false;
             this.southWall.Location = ((CSharp3D.Forms.Engine.LocationVector)(resources.GetObject("southWall.Location")));
             this.southWall.Material = null;
+            this.southWall.NeedsVertexUpdate = false;
             this.southWall.Rotation = ((CSharp3D.Forms.Engine.RotationVector)(resources.GetObject("southWall.Rotation")));
             this.southWall.ScaleX = 8F;
             this.southWall.ScaleY = 1F;
             this.southWall.ScaleZ = 4F;
             this.southWall.Scene = this.scene1;
+            this.southWall.ViewFilter = CSharp3D.Forms.Meshes.MeshViewFilter.All;
             // 
             // cuboidMesh1
             // 
             this.cuboidMesh1.Clickable = false;
+            this.cuboidMesh1.DepthMode = CSharp3D.Forms.Meshes.MeshDepthMode.Normal;
+            this.cuboidMesh1.ForceFullBright = false;
             this.cuboidMesh1.Location = ((CSharp3D.Forms.Engine.LocationVector)(resources.GetObject("cuboidMesh1.Location")));
             this.cuboidMesh1.Material = this.material1;
+            this.cuboidMesh1.NeedsVertexUpdate = false;
             this.cuboidMesh1.Rotation = ((CSharp3D.Forms.Engine.RotationVector)(resources.GetObject("cuboidMesh1.Rotation")));
             this.cuboidMesh1.ScaleX = 1F;
             this.cuboidMesh1.ScaleY = 1F;
             this.cuboidMesh1.ScaleZ = 1F;
             this.cuboidMesh1.Scene = this.scene1;
+            this.cuboidMesh1.ViewFilter = CSharp3D.Forms.Meshes.MeshViewFilter.All;
             // 
             // material1
             // 
@@ -212,11 +249,33 @@
             this.pointLight3.Quadratic = 1F;
             this.pointLight3.Scene = this.scene1;
             // 
+            // vulkanRendererControl1
+            // 
+            this.vulkanRendererControl1.AutoInvalidate = true;
+            this.vulkanRendererControl1.BackColor = System.Drawing.Color.Black;
+            this.vulkanRendererControl1.Bounces = 1;
+            this.vulkanRendererControl1.Camera = this.orbitalCamera1;
+            this.vulkanRendererControl1.CameraHost = null;
+            this.vulkanRendererControl1.CameraMouseButtons = ((System.Windows.Forms.MouseButtons)(((System.Windows.Forms.MouseButtons.Left | System.Windows.Forms.MouseButtons.Right) 
+            | System.Windows.Forms.MouseButtons.Middle)));
+            this.vulkanRendererControl1.Classifier = null;
+            this.vulkanRendererControl1.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.vulkanRendererControl1.ExposureBias = 0F;
+            this.vulkanRendererControl1.FocusOnHover = false;
+            this.vulkanRendererControl1.Location = new System.Drawing.Point(386, 0);
+            this.vulkanRendererControl1.Name = "vulkanRendererControl1";
+            this.vulkanRendererControl1.Scene = this.scene1;
+            this.vulkanRendererControl1.Size = new System.Drawing.Size(414, 450);
+            this.vulkanRendererControl1.TabIndex = 1;
+            this.vulkanRendererControl1.TargetSamples = 1024;
+            this.vulkanRendererControl1.UnitsPerMetre = 1F;
+            // 
             // Form1
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(800, 450);
+            this.Controls.Add(this.vulkanRendererControl1);
             this.Controls.Add(this.rendererControl1);
             this.Name = "Form1";
             this.Text = "Form1";
@@ -252,5 +311,6 @@
         private CSharp3D.Forms.Engine.Texture texture2;
         private CSharp3D.Forms.Engine.Texture texture3;
         private CSharp3D.Forms.Lights.PointLight pointLight3;
+        private CSharp3D.Forms.Vulkan.Controls.VulkanRendererControl vulkanRendererControl1;
     }
 }

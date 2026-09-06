@@ -112,6 +112,8 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         public float MinEV100;
         public float MaxEV100;
         public uint Reset;
+        public uint FixedExposure;
+        public float FixedEV100;
     }
 
     /// <summary>Push constants of overlay.vert / overlay.frag. 128 bytes, the guaranteed minimum.</summary>

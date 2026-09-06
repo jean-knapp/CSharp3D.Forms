@@ -126,8 +126,12 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         /// </summary>
         public static MeshClass DefaultClassify(Mesh mesh)
         {
-            if (mesh is LineMesh || mesh is PointMesh || mesh is SpriteMesh || mesh is CuboidMesh
-                || mesh is GridMesh || mesh is ParticleBatchMesh)
+            if (mesh is LineMesh || mesh is PointMesh || mesh is SpriteMesh || mesh is GridMesh || mesh is ParticleBatchMesh)
+                return MeshClass.Skip;
+
+            // A box is a wall or a crate - unless it is unlit, which is how an editor marks
+            // the box it stands in for an entity with.
+            if (mesh is CuboidMesh && mesh.Material != null && mesh.Material.Unlit)
                 return MeshClass.Skip;
 
             if (mesh.ViewFilter == MeshViewFilter.WireframeViewsOnly)
@@ -240,7 +244,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
             foreach (Mesh mesh in scene.Meshes)
             {
-                if (mesh == null || mesh.Material == null)
+                if (mesh == null)
                     continue;
 
                 MeshClass cls = Classifier(mesh);
@@ -248,9 +252,12 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 if (cls == MeshClass.Skip)
                     continue;
 
+                // The GL renderer draws a mesh with no material plain white; so does this.
+                Material material = mesh.Material;
+
                 // Glass and glows are the GL renderer's problem for now: drawn opaque they
                 // would wall off rooms behind a window.
-                if (mesh.Material.Translucent || mesh.Material.Additive || mesh.Material.Alpha < 1f)
+                if (material != null && (material.Translucent || material.Additive || material.Alpha < 1f))
                     continue;
 
                 if (mesh.GetIndexCount() < 3)
@@ -261,8 +268,8 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                     Mesh = mesh,
                     Class = cls,
                     Transform = mesh.GetModelMatrix(Matrix4.Identity),
-                    Color = mesh.Material.Color,
-                    Albedo = mesh.Material.Albedo != null ? mesh.Material.Albedo.Bitmap : null,
+                    Color = material != null ? material.Color : Color.White,
+                    Albedo = material != null && material.Albedo != null ? material.Albedo.Bitmap : null,
                 });
             }
 

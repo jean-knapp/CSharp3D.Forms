@@ -51,6 +51,9 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         public OverlayTopology Topology;
         public MeshDepthMode DepthMode;
         public bool Dotted;
+
+        /// <summary>Back faces are dropped, as the GL renderer drops them for a material that says so.</summary>
+        public bool CullBackFaces;
         public int Texture = -1;
         public int FirstVertex;
         public int VertexCount;
@@ -58,6 +61,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         public bool SameAs(OverlayBatch other)
         {
             return other != null && Topology == other.Topology && DepthMode == other.DepthMode && Dotted == other.Dotted
+                && CullBackFaces == other.CullBackFaces
                 && Texture == other.Texture && FirstVertex == other.FirstVertex && VertexCount == other.VertexCount;
         }
     }
@@ -70,25 +74,29 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             public OverlayTopology Topology;
             public MeshDepthMode DepthMode;
             public bool Dotted;
+            public bool Cull;
             public int Texture;
 
             public bool Equals(Key other)
             {
-                return Topology == other.Topology && DepthMode == other.DepthMode && Dotted == other.Dotted && Texture == other.Texture;
+                return Topology == other.Topology && DepthMode == other.DepthMode && Dotted == other.Dotted && Cull == other.Cull && Texture == other.Texture;
             }
 
             public override bool Equals(object obj) => obj is Key other && Equals(other);
 
             public override int GetHashCode()
             {
-                return ((int)Topology * 397) ^ ((int)DepthMode * 31) ^ (Dotted ? 1 : 0) ^ (Texture * 7919);
+                return ((int)Topology * 397) ^ ((int)DepthMode * 31) ^ (Dotted ? 1 : 0) ^ (Cull ? 2 : 0) ^ (Texture * 7919);
             }
         }
 
         /// <summary>Is this a mesh the overlay pass draws? Lines, entity boxes and icons.</summary>
         public static bool IsOverlay(Mesh mesh)
         {
-            return mesh is LineMesh || mesh is CuboidMesh || mesh is SpriteMesh;
+            if (mesh is CuboidMesh)
+                return mesh.Material != null && mesh.Material.Unlit;
+
+            return mesh is LineMesh || mesh is SpriteMesh;
         }
 
         /// <summary>
@@ -131,6 +139,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                     Topology = key.Topology,
                     DepthMode = key.DepthMode,
                     Dotted = key.Dotted,
+                    CullBackFaces = key.Cull,
                     Texture = key.Texture,
                     FirstVertex = at / OverlaySet.FloatsPerVertex,
                     VertexCount = data.Count / OverlaySet.FloatsPerVertex,
@@ -191,6 +200,10 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
                 // The GL view stipples in perspective only when the mesh asks for it.
                 Dotted = line != null && line.Dotted && line.DottedInPerspective,
+
+                // A box is culled like the GL view culls it: otherwise a camera inside an
+                // entity's box would see the box's inside walls over the whole picture.
+                Cull = line == null && sprite == null && mesh.Material.BackCulling,
                 Texture = -1,
             };
 

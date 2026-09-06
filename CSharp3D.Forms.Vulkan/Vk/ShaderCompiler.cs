@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using Silk.NET.Core.Native;
@@ -22,17 +24,69 @@ namespace CSharp3D.Forms.Vulkan.Vk
     {
         public enum Kind { RayGeneration, Miss, ClosestHit, AnyHit, Compute, Vertex, Fragment }
 
-        /// <summary>Where the GLSL lives; the host sets this the way it sets Scene.ShaderDirectory.</summary>
-        public static string ShaderDirectory = "resources/shaders/";
+        /// <summary>
+        /// Where the GLSL lives, when a host wants to say. Otherwise the usual places are
+        /// tried: the scene's own shader directory, <c>resources/shaders</c> (the IDE),
+        /// and <c>Shaders</c> (where the project's build puts them).
+        /// </summary>
+        public static string ShaderDirectory;
 
-        private const string Subdirectory = "RayTracing/";
+        private const string Subdirectory = "RayTracing";
 
         private readonly Shaderc _api;
+        private readonly string _preferred;
+        private string _root;
 
-        public ShaderCompiler()
+        /// <param name="preferredDirectory">A directory to look in first: the scene's ShaderDirectory, say.</param>
+        public ShaderCompiler(string preferredDirectory = null)
         {
+            _preferred = preferredDirectory;
             PreloadNative();
             _api = Shaderc.GetApi();
+        }
+
+        /// <summary>
+        /// The directory holding RayTracing/, found once. Relative candidates are tried
+        /// against the application directory and against this assembly's own, in that
+        /// order, since a host may keep its assemblies in a subfolder.
+        /// </summary>
+        private string FindRoot(string fileName)
+        {
+            if (_root != null)
+                return _root;
+
+            List<string> candidates = new List<string>();
+
+            foreach (string given in new[] { ShaderDirectory, _preferred, "resources/shaders", "Shaders", "shaders" })
+            {
+                if (string.IsNullOrEmpty(given))
+                    continue;
+
+                if (Path.IsPathRooted(given))
+                {
+                    candidates.Add(given);
+                    continue;
+                }
+
+                candidates.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, given));
+
+                string beside = Path.GetDirectoryName(typeof(ShaderCompiler).Assembly.Location);
+
+                if (!string.IsNullOrEmpty(beside))
+                    candidates.Add(Path.Combine(beside, given));
+            }
+
+            foreach (string candidate in candidates)
+            {
+                if (File.Exists(Path.Combine(candidate, Subdirectory, fileName)))
+                {
+                    _root = candidate;
+                    return _root;
+                }
+            }
+
+            throw new VulkanException("Shader " + fileName + " not found. Looked for " + Subdirectory + "/" + fileName + " under:\n  "
+                + string.Join("\n  ", candidates.Select(Path.GetFullPath).Distinct()));
         }
 
         [System.Runtime.InteropServices.DllImport("kernel32", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
@@ -66,13 +120,7 @@ namespace CSharp3D.Forms.Vulkan.Vk
         /// <summary>The SPIR-V for a shader file, compiled if the cache does not have it.</summary>
         public byte[] Compile(string fileName, Kind kind)
         {
-            // A relative directory is relative to the application, not to whatever the process's
-            // working directory happens to be: the IDE keeps resources\ beside its executable.
-            string root = Path.IsPathRooted(ShaderDirectory)
-                ? ShaderDirectory
-                : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ShaderDirectory);
-
-            string path = Path.Combine(root, Subdirectory, fileName);
+            string path = Path.Combine(FindRoot(fileName), Subdirectory, fileName);
 
             if (!File.Exists(path))
                 throw new VulkanException("Shader not found: " + Path.GetFullPath(path));

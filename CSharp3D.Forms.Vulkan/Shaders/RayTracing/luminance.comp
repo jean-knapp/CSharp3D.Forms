@@ -1,8 +1,10 @@
 #version 460
 
-// Auto exposure, the way Unreal's does it: the scene's average log luminance becomes an
-// EV100, clamped to the extended range the game enables, and the eye adapts towards it at
-// Unreal's default speeds (3 stops a second brightening, 1 darkening).
+// Exposure, the way Unreal's does it. Automatic: the scene's average log luminance becomes
+// an EV100, clamped to the extended range, and the eye adapts towards it at Unreal's default
+// speeds (3 stops a second brightening, 1 darkening). Fixed: the host's EV100 as it is, which
+// is what Unreal does with auto exposure disabled (Lambda Engine ships that way, at a white
+// point of 1: an exposure of exactly 1), so a brighter light is a brighter picture.
 //
 // One work group strides over the whole image; a few milliseconds, and it is the one place
 // the frame needs a total. The adapted value lives in the buffer between frames.
@@ -25,6 +27,8 @@ layout(push_constant) uniform Push
     float minEV100;
     float maxEV100;
     uint reset;            // start adapted at the target rather than easing to it
+    uint fixedExposure;    // 1: use fixedEV100 as the adapted value, no adaptation
+    float fixedEV100;
 } push;
 
 shared float partial[256];
@@ -60,6 +64,13 @@ void main()
 
     if (id == 0u)
     {
+        if (push.fixedExposure != 0u)
+        {
+            adaptedLogLum = push.fixedEV100;
+            exposure = 1.0 / (1.2 * exp2(push.fixedEV100 - push.exposureBias));
+            return;
+        }
+
         float averageLogLum = partial[0] / float(max(total, 1u));
 
         // Unreal's luminance-to-EV100 (ExposureCommon: log2(Lum * 100 / 12.5)), clamped to
