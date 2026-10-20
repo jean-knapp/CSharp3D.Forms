@@ -75,6 +75,40 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
         public float TextureScaleU = 1, TextureScaleV = 1;
 
+        // ---- displacement (null/0 for an ordinary brush face) ----
+
+        /// <summary>
+        /// Displaced vertices in world space, <c>row * DispDim + col</c>, where row runs
+        /// from base corner 0 toward corner 1 and col from corner 0 toward corner 3 (see
+        /// <see cref="DispCorners"/>). Non-null makes this face a displacement: it receives
+        /// light on the displaced surface and its triangles, not its base quad, cast shadows.
+        /// <see cref="Winding"/> stays the base quad — the lightmap is laid out over it.
+        /// </summary>
+        public Vector3[] DispPositions;
+
+        /// <summary>Per-vertex surface normals, same layout as <see cref="DispPositions"/>.</summary>
+        public Vector3[] DispNormals;
+
+        /// <summary>Vertices per side, <c>2^power + 1</c>.</summary>
+        public int DispDim;
+
+        /// <summary>The base quad in displacement corner order ([0,0], [D,0], [D,D], [0,D]).</summary>
+        public Vector3[] DispCorners;
+
+        public bool IsDisplacement
+        {
+            get { return DispPositions != null && DispDim >= 2 && DispCorners != null && DispCorners.Length == 4; }
+        }
+
+        /// <summary>
+        /// The points that bound the surface light actually lands on: the displaced grid for
+        /// a displacement, the winding otherwise.
+        /// </summary>
+        internal Vector3[] SurfacePoints
+        {
+            get { return IsDisplacement ? DispPositions : Winding; }
+        }
+
         // ---- baker-internal state ----
 
         /// <summary>
@@ -142,6 +176,35 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             Result = previous.Result;
             Bounce = previous.Bounce;
         }
+    }
+
+    /// <summary>
+    /// A point the baker computes an ambient cube at — one per lit model. The editor reads
+    /// <see cref="Cube"/> (an immutable array swapped atomically) and lights the model with
+    /// it the way Source lights props at run time.
+    /// </summary>
+    public sealed class LightProbe
+    {
+        /// <summary>Caller's identity for the probe (the model's entity).</summary>
+        public object Key;
+
+        /// <summary>Where the light is gathered, world space (the model's centre).</summary>
+        public Vector3 Position;
+
+        /// <summary>
+        /// Occluder id of the model's own surface, so a static prop does not shadow its own
+        /// probe; <c>int.MinValue</c> when the model casts no shadow.
+        /// </summary>
+        public int SkipId = int.MinValue;
+
+        /// <summary>
+        /// Light arriving from +X, −X, +Y, −Y, +Z, −Z in linear vrad units (255 = white), or
+        /// null until first computed. Swapped whole.
+        /// </summary>
+        public volatile Vector3[] Cube;
+
+        /// <summary>Bumped whenever <see cref="Cube"/> is replaced.</summary>
+        public volatile int Version;
     }
 
     /// <summary>

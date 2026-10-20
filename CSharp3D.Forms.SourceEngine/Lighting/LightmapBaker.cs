@@ -24,12 +24,39 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
     /// </summary>
     public class LightmapBaker : IDisposable
     {
-        // ---- tuning (ray counts per pass level; level 2 = vrad's own numbers) ----
+        // ---- tuning (ray counts per pass level; the final level comes from the settings) ----
 
-        private static readonly int[] SunRaysPerLevel = { 1, 8, 30 };      // NSAMPLES_SUN_AREA_LIGHT = 30
-        private static readonly int[] SkyRaysPerLevel = { 24, 64, 162 };   // NUMVERTEXNORMALS = 162
+        private static readonly int[] SunRaysCoarse = { 1, 8 };            // final: LightPreviewSettings.SamplesSun
+        private static readonly int[] SkyRaysCoarse = { 24, 64 };          // final: LightPreviewSettings.SamplesAmbient
         private static readonly int[] AoRaysPerLevel = { 0, 8, 32 };       // CalculateAmbientOcclusion4 = 32
         private static readonly float[] LuxelCoarsen = { 4.0f, 1.0f, 1.0f };
+
+        // ---- light model, from LightPreviewSettings (ApplySettings) ----
+        //
+        // The defaults below are CS:GO VRAD's, which is what this baker always did before it
+        // took settings; the editor replaces them with the target game's before baking.
+
+        private volatile int _sunRaysFinal = 30;       // NSAMPLES_SUN_AREA_LIGHT
+        private volatile int _skyRaysFinal = 162;      // NUMVERTEXNORMALS
+        private volatile bool _softenCosine = true;
+        private float _aoScale = 1.0f;
+        private float _brightnessScale = 1.0f;
+        private float _radiusScale = 1.0f;
+
+        /// <summary>Bounce iterations used while <see cref="LightPreviewSettings.Bounced"/> is on.</summary>
+        private const int BounceIterationsOn = 2;
+
+        private int SunRays(int level)
+        {
+            int final = _sunRaysFinal;
+            return level < SunRaysCoarse.Length ? Math.Min(SunRaysCoarse[level], final) : final;
+        }
+
+        private int SkyRays(int level)
+        {
+            int final = _skyRaysFinal;
+            return level < SkyRaysCoarse.Length ? Math.Min(SkyRaysCoarse[level], final) : final;
+        }
 
         private const int Levels = 3;
 
@@ -66,14 +93,6 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// without flattening real colour bleed.
         /// </summary>
         public int BounceSmoothPasses = 3;
-
-        /// <summary>
-        /// CS:GO VRAD's ambient occlusion (lightmap.cpp:54). It is ON in a stock compile
-        /// (<c>g_bNoAO = false</c>) and darkens EVERY direct contribution — point, spot,
-        /// sun and sky ambient alike — so leaving it out makes corners and creases
-        /// visibly brighter than the compiled map. Mirrors vrad's <c>-noao</c>.
-        /// </summary>
-        public bool AmbientOcclusion = true;
 
         /// <summary>CalculateAmbientOcclusion4's fixed 36-unit ray length.</summary>
         private const float AoRayLength = 36.0f;
@@ -118,6 +137,48 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
         private readonly object _gate = new object();
         private List<BakeFace> _faces = new List<BakeFace>();
+
+        /// <summary>
+        /// Shadow-only geometry that is not a face — static props. In the BVH with
+        /// <see cref="OccluderId"/>, so it blocks light and bounce rays but never matches a
+        /// face's self-shadow skip id and is never read as a bounce emitter (Hammer++ gives
+        /// props zero reflectivity the same way).
+        /// </summary>
+        private List<RayTriangle> _occluders = new List<RayTriangle>();
+
+        /// <summary>
+        /// Triangle id of the <see cref="_occluders"/> entries: outside any face index. Ids
+        /// below it are occluders too, and let a <see cref="LightProbe"/> skip its own prop.
+        /// </summary>
+        public const int OccluderId = -2;
+
+        /// <summary>Probes to compute ambient cubes at (props), and the scene state they were computed for.</summary>
+        private List<LightProbe> _probes = new List<LightProbe>();
+        private int _probeGeneration = -1;
+        private bool _probesDirty;
+
+        /// <summary>
+        /// Replace the probe list — one per lit model. Probes are recomputed after every
+        /// scene, light or bounce change once the face work has drained; a probe whose
+        /// position did not change keeps showing its previous cube until then.
+        /// </summary>
+        public void SetProbes(List<LightProbe> probes)
+        {
+            lock (_gate)
+            {
+                _probes = probes ?? new List<LightProbe>();
+                _probesDirty = true;
+            }
+
+            _wake.Set();
+        }
+
+        /// <summary>
+        /// The "skip nothing" id for shadow rays. Displacement luxels pass it instead of their
+        /// face index: a displacement's own triangles must be able to shadow it (a hill
+        /// shading the valley behind it), which skipping the face id would prevent.
+        /// </summary>
+        private const int NoSkip = int.MinValue;
 
         /// <summary>Lights that came from entities — the list callers hand us.</summary>
         private List<SourceLight> _entityLights = new List<SourceLight>();
@@ -255,7 +316,8 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                     return _queues[0].Count + _queues[1].Count + _queues[2].Count == 0
                         && !_bounceDirty && !_bounceRunning
                         && !_sweepPending && !_sweepRunning && !_fullPending
-                        && !_bvhStale && !_surfaceLightsDirty;
+                        && !_bvhStale && !_surfaceLightsDirty
+                        && (_probes.Count == 0 || (!_probesDirty && _probeGeneration == _generation));
                 }
             }
         }
@@ -490,15 +552,200 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             _wake.Set();
         }
 
+        /// <summary>
+        /// Take the user's preview settings. Changes that alter the result (sample counts,
+        /// the light model, the scales, bounce) rebake the whole map; displayed lightmaps
+        /// stay on screen until their replacements land, as with any edit.
+        /// </summary>
+        public void ApplySettings(LightPreviewSettings settings)
+        {
+            if (settings == null)
+                return;
+
+            LightPreviewSettings s = settings.Clone();
+            s.Clamp();
+
+            lock (_gate)
+            {
+                bool changed = s.SamplesSun != _sunRaysFinal
+                            || s.SamplesAmbient != _skyRaysFinal
+                            || s.SoftenCosine != _softenCosine
+                            || s.AoScale != _aoScale
+                            || s.BrightnessScale != _brightnessScale
+                            || s.RadiusScale != _radiusScale
+                            || (s.Bounced ? BounceIterationsOn : 0) != BounceIterations;
+
+                if (!changed)
+                    return;
+
+                _sunRaysFinal = s.SamplesSun;
+                _skyRaysFinal = s.SamplesAmbient;
+                _softenCosine = s.SoftenCosine;
+                _aoScale = s.AoScale;
+                _brightnessScale = s.BrightnessScale;
+                _radiusScale = s.RadiusScale;
+                BounceIterations = s.Bounced ? BounceIterationsOn : 0;
+
+                CombineLights();
+                RequeueEverything();
+            }
+
+            _wake.Set();
+        }
+
+        /// <summary>
+        /// Rebake every face and re-solve the bounce from scratch — Hammer++'s "bake entire
+        /// scene". The incremental paths make this unnecessary in normal use; it is the
+        /// explicit "I don't trust what I see" button, and how pending work is flushed when
+        /// incremental baking is off.
+        /// </summary>
+        public void RebakeAll()
+        {
+            lock (_gate)
+            {
+                RequeueEverything();
+            }
+
+            _wake.Set();
+        }
+
+        /// <summary>
+        /// Hammer++'s "bake in radius": recompute, at final quality and ahead of everything
+        /// else queued, every face within <paramref name="radius"/> of
+        /// <paramref name="center"/> (normally the 3D camera), then re-bounce that region.
+        /// </summary>
+        public void BakeAround(Vector3 center, float radius)
+        {
+            lock (_gate)
+            {
+                _generation++;
+                Vector3 r = new Vector3(radius);
+
+                foreach (BakeFace face in _faces)
+                {
+                    if (!face.WantsLightmap)
+                        continue;
+
+                    Vector3 min, max;
+                    FaceBounds(face, out min, out max);
+
+                    if (!SphereTouchesBox(center, radius, min, max))
+                        continue;
+
+                    if (face.BakedLevel >= 2)
+                        face.BakedLevel = 1;
+
+                    EnqueueForRelight(face, urgent: true);
+                }
+
+                if (BounceIterations > 0)
+                {
+                    _bounceDirty = true;
+                    _bounceCoarseDone = true;      // straight to full quality
+                    ExtendRegion(ref _bounceMin, ref _bounceMax, center - r, center + r);
+                }
+
+                ResetJobCounters();
+                Touch();
+            }
+
+            _wake.Set();
+        }
+
+        /// <summary>
+        /// Replace the shadow-only geometry (static props). <paramref name="dirtyMin"/>..
+        /// <paramref name="dirtyMax"/> bound what changed — old and new extents of every prop
+        /// that moved, appeared or vanished — and only faces whose shadows that region can
+        /// reach are requeued, exactly as for a brush edit.
+        /// </summary>
+        public void UpdateOccluders(List<RayTriangle> occluders, Vector3 dirtyMin, Vector3 dirtyMax)
+        {
+            lock (_gate)
+            {
+                _occluders = occluders ?? new List<RayTriangle>();
+                _bvhStale = true;
+                _generation++;
+                _bounceDirty |= BounceIterations > 0;
+                _bounceCoarseDone = false;
+                _sweepPending = true;
+                _fullPending = true;
+
+                ExtendRegion(ref _dirtyMin, ref _dirtyMax, dirtyMin, dirtyMax);
+                ExtendRegion(ref _bounceMin, ref _bounceMax, dirtyMin, dirtyMax);
+                RequeueShadowReceivers(dirtyMin, dirtyMax, null);
+
+                ResetJobCounters();
+                Touch();
+            }
+
+            _wake.Set();
+        }
+
         // ---- input helpers (called under _gate) ----
 
-        /// <summary>Refresh the combined light list the bake loops over.</summary>
+        /// <summary>
+        /// Every face back through the pass ladder plus an authoritative whole-map bounce.
+        /// Faces showing a result keep it on screen until the rebake replaces it.
+        /// </summary>
+        private void RequeueEverything()
+        {
+            _generation++;
+
+            foreach (BakeFace face in _faces)
+            {
+                if (!face.WantsLightmap)
+                    continue;
+
+                if (face.BakedLevel >= 1)
+                    face.BakedLevel = 0;
+
+                EnqueueForRelight(face);
+            }
+
+            _bounceDirty = BounceIterations > 0;
+            _bounceAll = true;
+            _bounceCoarseDone = false;
+            _sweepPending = false;
+            _fullPending = false;
+            ClearRegion(ref _dirtyMin, ref _dirtyMax);
+
+            if (BounceIterations == 0)
+            {
+                // Bounce just got switched off: drop the indirect light it left behind, or
+                // the faces would keep composing it in.
+                foreach (BakeFace face in _faces)
+                    face.Bounce = null;
+            }
+
+            ResetJobCounters();
+            Touch();
+        }
+
+        /// <summary>
+        /// Refresh the combined light list the bake loops over, with the brightness and
+        /// radius scales applied. Copies, never the caller's objects: the entity list is
+        /// what <see cref="UpdateLights"/> diffs against, so it must stay unscaled.
+        /// </summary>
         private void CombineLights()
         {
             List<SourceLight> all = new List<SourceLight>(_entityLights.Count + _surfaceLights.Count);
-            all.AddRange(_entityLights);
-            all.AddRange(_surfaceLights);
+            bool scaled = _brightnessScale != 1.0f || _radiusScale != 1.0f;
+
+            foreach (SourceLight light in _entityLights)
+                all.Add(scaled ? Scaled(light) : light);
+
+            foreach (SourceLight light in _surfaceLights)
+                all.Add(scaled ? Scaled(light) : light);
+
             _lights = all;
+        }
+
+        private SourceLight Scaled(SourceLight light)
+        {
+            SourceLight copy = light.Clone();
+            copy.Intensity *= _brightnessScale;
+            copy.RadiusScale *= _radiusScale;
+            return copy;
         }
 
         /// <summary>vrad's dlight_threshold (vrad.cpp:71): dimmer texlights are dropped.</summary>
@@ -545,7 +792,9 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
                 face.SurfaceEmitters = EmptyLights;
 
-                if (face.Winding == null || face.Winding.Length < 3 || face.IsSky)
+                // Emissive displacements are not modelled: their emitters would sit on the base
+                // quad, not the sculpted surface. (Texture lights on displacements are rare.)
+                if (face.Winding == null || face.Winding.Length < 3 || face.IsSky || face.IsDisplacement)
                     continue;
 
                 Vector3 emit = face.EmitColor;
@@ -892,10 +1141,12 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             min = new Vector3(float.MaxValue);
             max = new Vector3(float.MinValue);
 
-            for (int i = 0; i < face.Winding.Length; i++)
+            Vector3[] points = face.SurfacePoints;
+
+            for (int i = 0; i < points.Length; i++)
             {
-                min = Vector3.Min(min, face.Winding[i]);
-                max = Vector3.Max(max, face.Winding[i]);
+                min = Vector3.Min(min, points[i]);
+                max = Vector3.Max(max, points[i]);
             }
         }
 
@@ -1019,13 +1270,16 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             // can hold thousands of them and this test runs per face per light. Both
             // half-space rejections below are exact (the kernel would return zero
             // anyway) and they knock out most of the map for each emitter.
+            // (Displacements are not planar, so "turns toward the emitter" is not a half-space
+            // test there; only the emitter-side rejection applies.)
             if (light.Type == SourceLightType.Surface && face.Winding != null)
             {
-                bool anyInFront = false, anyFacing = false;
+                Vector3[] points = face.SurfacePoints;
+                bool anyInFront = false, anyFacing = face.IsDisplacement;
 
-                for (int i = 0; i < face.Winding.Length && !(anyInFront && anyFacing); i++)
+                for (int i = 0; i < points.Length && !(anyInFront && anyFacing); i++)
                 {
-                    Vector3 toPoint = face.Winding[i] - light.Origin;
+                    Vector3 toPoint = points[i] - light.Origin;
 
                     if (Vector3.Dot(toPoint, light.Normal) > 0)
                         anyInFront = true;      // some of the face is in front of the emitter
@@ -1101,13 +1355,16 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 bool needBvh, needSurfaceLights;
                 int topology;
 
+                List<RayTriangle> occluders;
+
                 lock (_gate)
                 {
                     generation = _generation;
                     topology = _topology;
                     faces = _faces;
                     lights = _lights;
-                    needBvh = _bvhStale && _faces.Count > 0;
+                    occluders = _occluders;
+                    needBvh = _bvhStale && (_faces.Count > 0 || _occluders.Count > 0);
                     needSurfaceLights = _surfaceLightsDirty;
                     bvh = _bvh;
                 }
@@ -1116,7 +1373,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 {
                     // Build outside the lock — this can take a while on big maps and the
                     // UI thread must never wait on it (scene updates take _gate).
-                    RayBvh built = BuildBvh(faces);
+                    RayBvh built = BuildBvh(faces, occluders);
 
                     lock (_gate)
                     {
@@ -1342,15 +1599,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
                     int lvl = level;
 
-                    if (batch.Count == 1)
-                    {
-                        BakeFaceDirect(batch[0], lvl, bvh, lights, generation);
-                    }
-                    else
-                    {
-                        Parallel.ForEach(batch, ParallelOpts,
-                            face => BakeFaceDirect(face, lvl, bvh, lights, generation));
-                    }
+                    BakeBatch(batch, lvl, bvh, lights, generation);
 
                     lock (_gate)
                     {
@@ -1406,6 +1655,45 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                             }
                         }
                     }
+                    lock (_gate)
+                    {
+                        // New indirect light: the probes gather it too.
+                        _probesDirty = true;
+                    }
+
+                    RaiseResults();
+                    published = false;
+                    continue;
+                }
+
+                // Ambient cubes for models, once the faces they gather from have settled.
+                List<LightProbe> probes = null;
+
+                lock (_gate)
+                {
+                    bool facesIdle = _queues[0].Count + _queues[1].Count + _queues[2].Count == 0;
+
+                    if (facesIdle && !_bounceRunning && _probes.Count > 0 && bvh != null
+                        && (_probesDirty || _probeGeneration != _generation))
+                    {
+                        probes = _probes;
+                        _probesDirty = false;
+                    }
+                }
+
+                if (probes != null)
+                {
+                    Status = "lighting models";
+                    ComputeProbes(probes, faces, lights, bvh, generation);
+
+                    lock (_gate)
+                    {
+                        if (generation == _generation)
+                            _probeGeneration = generation;
+                        else
+                            _probesDirty = true;
+                    }
+
                     RaiseResults();
                     published = false;
                     continue;
@@ -1447,9 +1735,9 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             }
         }
 
-        private static RayBvh BuildBvh(List<BakeFace> faces)
+        private static RayBvh BuildBvh(List<BakeFace> faces, List<RayTriangle> occluders)
         {
-            List<RayTriangle> tris = new List<RayTriangle>();
+            List<RayTriangle> tris = new List<RayTriangle>(occluders != null ? occluders.Count : 0);
 
             for (int f = 0; f < faces.Count; f++)
             {
@@ -1460,66 +1748,354 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
                 RayTriangleFlags flags = face.IsSky ? RayTriangleFlags.Sky : RayTriangleFlags.None;
 
+                if (face.IsDisplacement)
+                {
+                    // The sculpted surface casts the shadow, not the base quad.
+                    AddDisplacementTriangles(tris, face, f, flags);
+                    continue;
+                }
+
                 for (int i = 2; i < face.Winding.Length; i++)
                     tris.Add(new RayTriangle(face.Winding[0], face.Winding[i - 1], face.Winding[i], f, flags));
+            }
+
+            if (occluders != null)
+            {
+                // Callers may tag each occluder group with its own id at or below OccluderId
+                // (one per prop, so that prop's probe can skip its own surface); anything
+                // else is folded into OccluderId so it can never collide with a face index.
+                foreach (RayTriangle tri in occluders)
+                {
+                    int id = tri.Id <= OccluderId ? tri.Id : OccluderId;
+                    tris.Add(new RayTriangle(tri.V0, tri.V1, tri.V2, id, RayTriangleFlags.None));
+                }
             }
 
             return RayBvh.Build(tris);
         }
 
-        // ==================== direct lighting (GatherSample* ports) ====================
-
-        /// <summary>lightmap.cpp SoftenCosineTerm: (dot + dot²) / 2.</summary>
-        private static float SoftenCosine(float dot)
+        /// <summary>Two triangles per grid cell, Source's alternating diagonal.</summary>
+        private static void AddDisplacementTriangles(List<RayTriangle> tris, BakeFace face, int id, RayTriangleFlags flags)
         {
-            return (dot + dot * dot) * 0.5f;
+            int dim = face.DispDim;
+            Vector3[] p = face.DispPositions;
+
+            for (int r = 0; r < dim - 1; r++)
+            {
+                for (int c = 0; c < dim - 1; c++)
+                {
+                    int i00 = r * dim + c, i01 = i00 + 1, i10 = i00 + dim, i11 = i10 + 1;
+
+                    if (((r * (dim - 1) + c) & 1) == 0)
+                    {
+                        tris.Add(new RayTriangle(p[i00], p[i10], p[i11], id, flags));
+                        tris.Add(new RayTriangle(p[i00], p[i11], p[i01], id, flags));
+                    }
+                    else
+                    {
+                        tris.Add(new RayTriangle(p[i00], p[i10], p[i01], id, flags));
+                        tris.Add(new RayTriangle(p[i10], p[i11], p[i01], id, flags));
+                    }
+                }
+            }
         }
 
         /// <summary>
-        /// Supplies the oracle that answers visibility for a bake, or null to trace on the
-        /// CPU. Set by the host when a GPU tracer is available; left null the rest of the
-        /// time, which is what makes the CPU path the default rather than the fallback.
-        ///
-        /// Called once per face, from the worker thread. An implementation that cannot
-        /// serve a particular BVH — no context, a failed dispatch, a scene too large for
-        /// its buffers — returns null and gets the CPU path for that face, so a GPU that
-        /// gives up mid-bake degrades instead of stopping.
+        /// The luxel (or patch) grid a face is lit on: the planar lattice for a brush face,
+        /// the lattice lifted onto the sculpted surface for a displacement.
         /// </summary>
-        public Func<RayBvh, IRayOracle> OracleFactory;
-
-        private IRayOracle ResolveOracle(RayBvh bvh)
+        private static LuxelGrid BuildGrid(BakeFace face, float luxelSize)
         {
-            Func<RayBvh, IRayOracle> factory = OracleFactory;
-
-            if (factory != null)
+            if (face.IsDisplacement)
             {
-                IRayOracle oracle = factory(bvh);
-
-                if (oracle != null)
-                    return oracle;
+                return LuxelGrid.BuildDisplacement(face.DispCorners, face.Normal, face.AxisU, face.AxisV, luxelSize,
+                                                   face.DispPositions, face.DispNormals, face.DispDim);
             }
 
-            return new BvhRayOracle(bvh);
+            return LuxelGrid.Build(face.Winding, face.Normal, face.AxisU, face.AxisV, luxelSize);
         }
 
-        private void BakeFaceDirect(BakeFace face, int level, RayBvh bvh,
-                                    List<SourceLight> lights, int generation)
+        // ==================== direct lighting (GatherSample* ports) ====================
+
+        /// <summary>
+        /// lightmap.cpp SoftenCosineTerm: (dot + dot²) / 2 — CS:GO VRAD only (on unless
+        /// <c>-nosoften</c>); SDK 2013 VRAD uses the plain cosine.
+        /// </summary>
+        private float SoftenCosine(float dot)
+        {
+            return _softenCosine ? (dot + dot * dot) * 0.5f : dot;
+        }
+
+        /// <summary>
+        /// Supplies the GPU tracer for a bake, or null to trace on the CPU. Set by the host
+        /// when a GPU tracer is available; left null the rest of the time, which is what
+        /// makes the CPU path the default rather than the fallback.
+        ///
+        /// Called once per batch, from the worker thread. An implementation that cannot
+        /// serve a particular BVH — no context, a scene too large for its buffers — returns
+        /// null and gets the CPU path for that batch, and a dispatch that fails sends its
+        /// faces to the CPU, so a GPU that gives up mid-bake degrades instead of stopping.
+        /// </summary>
+        public Func<RayBvh, GpuBatchOracle> OracleFactory;
+
+        /// <summary>
+        /// The GPU tracer for this bake, or null. Asked ONLY from the worker thread: a GPU
+        /// tracer's GL context is current there and nowhere else, so calling the factory
+        /// from a pool thread — which is where the parallel face bake runs — touched GL with
+        /// no context and crashed the process (an AccessViolationException in UploadScene).
+        /// </summary>
+        private GpuBatchOracle ResolveGpuOracle(RayBvh bvh)
+        {
+            Func<RayBvh, GpuBatchOracle> factory = OracleFactory;
+            return factory != null ? factory(bvh) : null;
+        }
+
+        /// <summary>
+        /// Luxels per recording on the GPU path. A face's luxels are independent, so a large
+        /// face splits into spans that record and replay on different cores; one recording
+        /// per face left the biggest faces running on one thread while the rest waited.
+        /// </summary>
+        private const int GpuSpanLuxels = 512;
+
+        /// <summary>One face's lighting inputs, worked out once and shared by its spans.</summary>
+        private sealed class FaceJob
+        {
+            public BakeFace Face;
+            public LuxelGrid Grid;
+            public Vector3 Normal;
+            public int FaceIndex;
+            public List<SourceLight> Relevant;
+            public int SunRays;
+            public Vector3[] SkyDirs;
+            public int AoRays;
+            public Vector3[] Direct;
+            public int Count;
+
+            /// <summary>
+            /// About the rays a luxel asks, to size its recordings up front: growing them by
+            /// doubling copied every recorded ray several times over. An estimate - a span that
+            /// asks more still grows.
+            /// </summary>
+            public int RaysPerLuxel;
+        }
+
+        /// <summary>A run of one face's luxels and the rays it asks.</summary>
+        private sealed class SpanJob
+        {
+            public FaceJob Job;
+            public int Start;
+            public int End;
+            public RayRecording Rays;
+        }
+
+        /// <summary>
+        /// Bake one batch of same-level faces: on the GPU when one is tracing, else every
+        /// face in parallel on the CPU.
+        /// </summary>
+        private void BakeBatch(List<BakeFace> batch, int level, RayBvh bvh, List<SourceLight> lights, int generation)
+        {
+            GpuBatchOracle gpu = ResolveGpuOracle(bvh);
+
+            if (gpu != null)
+            {
+                BakeBatchOnGpu(batch, level, bvh, lights, generation, gpu);
+                return;
+            }
+
+            if (batch.Count == 1)
+                BakeFaceOnCpu(batch[0], level, bvh, lights, generation);
+            else
+                Parallel.ForEach(batch, ParallelOpts,
+                    face => BakeFaceOnCpu(face, level, bvh, lights, generation));
+        }
+
+        private void BakeFaceOnCpu(BakeFace face, int level, RayBvh bvh,
+                                   List<SourceLight> lights, int generation)
+        {
+            FaceJob job = PrepareFace(face, level, bvh, lights);
+
+            if (job == null)
+                return;
+
+            BakeFaceLuxels(job.Grid, job.Normal, job.FaceIndex, job.Relevant, job.SunRays, job.SkyDirs,
+                           job.AoRays, new BvhRayOracle(bvh), job.Direct, job.Count, generation);
+
+            FinishFace(job, level, generation);
+        }
+
+        /// <summary>
+        /// The GPU path, in three steps over the whole batch: record every span's rays in
+        /// parallel, trace them all from this (the worker) thread — the only one the GPU
+        /// context is current on — then replay the answers in parallel and publish.
+        /// </summary>
+        private void BakeBatchOnGpu(List<BakeFace> batch, int level, RayBvh bvh,
+                                    List<SourceLight> lights, int generation, GpuBatchOracle gpu)
+        {
+            FaceJob[] jobs = new FaceJob[batch.Count];
+
+            Parallel.For(0, batch.Count, ParallelOpts,
+                i => jobs[i] = PrepareFace(batch[i], level, bvh, lights));
+
+            List<SpanJob> spans = new List<SpanJob>();
+
+            foreach (FaceJob job in jobs)
+            {
+                if (job == null)
+                    continue;
+
+                for (int start = 0; start < job.Count; start += GpuSpanLuxels)
+                {
+                    spans.Add(new SpanJob
+                    {
+                        Job = job,
+                        Start = start,
+                        End = Math.Min(job.Count, start + GpuSpanLuxels),
+                    });
+                }
+            }
+
+            // Pipelined in groups, so the GPU and the CPU work at the same time: while this
+            // thread waits on one group's trace, the pool records the next group and replays
+            // the last. Unpipelined, each side sat idle for the other's whole step.
+            List<List<SpanJob>> groups = SplitSpans(spans, GpuPipelineGroups);
+            List<Task> replays = new List<Task>();
+            Func<bool> cancelled = () => Volatile.Read(ref _generation) != generation;
+
+            Task recording = groups.Count > 0 ? Task.Run(() => RecordSpans(groups[0], gpu, generation)) : null;
+
+            for (int g = 0; g < groups.Count; g++)
+            {
+                recording.Wait();
+
+                if (cancelled())
+                    break;
+
+                List<SpanJob> group = groups[g];
+
+                if (g + 1 < groups.Count)
+                {
+                    List<SpanJob> next = groups[g + 1];
+                    recording = Task.Run(() => RecordSpans(next, gpu, generation));
+                }
+
+                RayRecording[] recordings = new RayRecording[group.Count];
+
+                for (int i = 0; i < group.Count; i++)
+                    recordings[i] = group[i].Rays;
+
+                gpu.TraceAll(recordings, cancelled);
+
+                replays.Add(Task.Run(() => Parallel.ForEach(group, ParallelOpts, span =>
+                {
+                    BakeSpan(span, generation);
+                    span.Rays.Release();
+                })));
+            }
+
+            // Every task finishes before this returns, cancelled or not: a span still being
+            // recorded or replayed must not outlive the batch that owns its arrays.
+            if (recording != null)
+                recording.Wait();
+
+            Task.WaitAll(replays.ToArray());
+
+            if (cancelled())
+                return;
+
+            foreach (FaceJob job in jobs)
+            {
+                if (job != null)
+                    FinishFace(job, level, generation);
+            }
+        }
+
+        /// <summary>
+        /// Groups the GPU path pipelines a batch's spans into. More overlaps the two sides
+        /// better at the ends of a batch; fewer keeps each dispatch wide.
+        /// </summary>
+        private const int GpuPipelineGroups = 4;
+
+        /// <summary>Split spans into up to <paramref name="count"/> runs of similar luxel totals.</summary>
+        private static List<List<SpanJob>> SplitSpans(List<SpanJob> spans, int count)
+        {
+            long luxels = 0;
+
+            foreach (SpanJob span in spans)
+                luxels += span.End - span.Start;
+
+            long target = Math.Max(1, (luxels + count - 1) / count);
+
+            List<List<SpanJob>> groups = new List<List<SpanJob>>();
+            List<SpanJob> group = null;
+            long inGroup = 0;
+
+            foreach (SpanJob span in spans)
+            {
+                if (group == null || inGroup >= target)
+                {
+                    group = new List<SpanJob>();
+                    groups.Add(group);
+                    inGroup = 0;
+                }
+
+                group.Add(span);
+                inGroup += span.End - span.Start;
+            }
+
+            return groups;
+        }
+
+        private void RecordSpans(List<SpanJob> spans, GpuBatchOracle gpu, int generation)
+        {
+            Parallel.ForEach(spans, ParallelOpts, span =>
+            {
+                span.Rays = gpu.NewRecording((span.End - span.Start) * span.Job.RaysPerLuxel);
+                BakeSpan(span, generation);
+            });
+        }
+
+        private void BakeSpan(SpanJob span, int generation)
+        {
+            FaceJob job = span.Job;
+
+            BakeLuxelSpan(job.Grid, job.Normal, job.FaceIndex, job.Relevant, job.SunRays, job.SkyDirs,
+                          job.AoRays, span.Rays, job.Direct, span.Start, span.End, generation);
+        }
+
+        /// <summary>
+        /// Everything about a face's lighting that does not depend on who traces it: the
+        /// luxel grid, and the lights that can reach it. Null for a face with no grid.
+        ///
+        /// The light cull traces on the CPU whoever bakes the face. It decides which lights
+        /// the face's rays are cast for, so it has to be settled before those rays can be
+        /// recorded — and it is a handful of early-out probes per light, cheap next to the
+        /// bake it trims.
+        /// </summary>
+        private FaceJob PrepareFace(BakeFace face, int level, RayBvh bvh, List<SourceLight> lights)
         {
             float luxelSize = Math.Max(1, face.LightmapScale) * LuxelCoarsen[level];
 
-            LuxelGrid grid = LuxelGrid.Build(face.Winding, face.Normal, face.AxisU, face.AxisV, luxelSize);
+            LuxelGrid grid = BuildGrid(face, luxelSize);
             if (grid == null)
-                return;
+                return null;
 
-            int count = grid.Width * grid.Height;
-            Vector3[] direct = new Vector3[count];
+            FaceJob job = new FaceJob
+            {
+                Face = face,
+                Grid = grid,
+                Normal = face.Normal,
+                Count = grid.Width * grid.Height,
+                SunRays = SunRays(level),
+                SkyDirs = SphereDirections.Table(SkyRays(level)),
+                AoRays = _aoScale > 0 ? AoRaysPerLevel[level] : 0,
 
-            int sunRays = SunRaysPerLevel[level];
-            Vector3[] skyDirs = SphereDirections.Table(SkyRaysPerLevel[level]);
-            int aoRays = AmbientOcclusion ? AoRaysPerLevel[level] : 0;
+                // The id shadow rays skip. A planar face cannot shadow itself, and skipping
+                // it spares every ray the self-intersection test; a displacement can, so it
+                // skips nothing and relies on the 1-unit normal offset alone, like vrad.
+                FaceIndex = face.IsDisplacement ? NoSkip : face.Index,
+            };
 
-            Vector3 normal = face.Normal;
-            int faceIndex = face.Index;
+            job.Direct = new Vector3[job.Count];
 
             Vector3 faceMin, faceMax;
             FaceBounds(face, out faceMin, out faceMax);
@@ -1536,54 +2112,38 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                     relevant.Add(light);
             }
 
-            // Whoever answers the visibility questions for this face — the GPU tracer when
-            // one is running, else a plain per-ray BVH descent. The lighting below neither
-            // knows nor cares which, which is the point of the seam.
-            IRayOracle rays = ResolveOracle(bvh);
-
             if (bvh != null && relevant.Count > VisibilityCullThreshold)
-                relevant = CullInvisibleLights(relevant, grid, normal, faceIndex, rays);
+                relevant = CullInvisibleLights(relevant, grid, job.Normal, job.FaceIndex, new BvhRayOracle(bvh));
 
-            GpuBatchOracle batch = rays as GpuBatchOracle;
+            job.Relevant = relevant;
 
-            if (batch != null)
+            int raysPerLuxel = job.AoRays;
+
+            foreach (SourceLight light in relevant)
             {
-                // Record every ray the lighting wants, trace them in one dispatch, then run
-                // the lighting again to consume the answers. See GpuBatchOracle for why the
-                // two passes are guaranteed to ask for the same rays in the same order.
-                batch.BeginRecording();
-                BakeFaceLuxels(grid, normal, faceIndex, relevant, sunRays, skyDirs, aoRays, rays,
-                               direct, count, generation);
-
-                if (Volatile.Read(ref _generation) != generation)
-                    return;
-
-                if (!batch.Resolve())
+                switch (light.Type)
                 {
-                    // Too many rays for one batch, or the dispatch failed. Bake the face on
-                    // the CPU rather than dropping it — a GPU that gives up degrades.
-                    rays = new BvhRayOracle(bvh);
+                    // Only the directions above the surface are cast: half the sphere.
+                    case SourceLightType.SkyAmbient: raysPerLuxel += job.SkyDirs.Length / 2 + 1; break;
+                    case SourceLightType.SkyLight: raysPerLuxel += job.SunRays; break;
+                    default: raysPerLuxel += 1; break;
                 }
-
-                BakeFaceLuxels(grid, normal, faceIndex, relevant, sunRays, skyDirs, aoRays, rays,
-                               direct, count, generation);
-
-                batch.EndFace();
-            }
-            else
-            {
-                BakeFaceLuxels(grid, normal, faceIndex, relevant, sunRays, skyDirs, aoRays, rays,
-                               direct, count, generation);
             }
 
-            // Never install data computed against a superseded scene.
+            job.RaysPerLuxel = raysPerLuxel;
+            return job;
+        }
+
+        /// <summary>Install a baked face — never data computed against a superseded scene.</summary>
+        private void FinishFace(FaceJob job, int level, int generation)
+        {
             if (Volatile.Read(ref _generation) != generation)
                 return;
 
-            face.Grid = grid;
-            face.Direct = direct;
+            job.Face.Grid = job.Grid;
+            job.Face.Direct = job.Direct;
 
-            Publish(face, level);
+            Publish(job.Face, level);
         }
 
         /// <summary>
@@ -1667,7 +2227,8 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
                 for (int p = 0; p < probeCount && !anySees; p++)
                 {
-                    Vector3 pos = grid.Positions[probes[p]] + normal;
+                    Vector3 n = grid.Normals != null ? grid.Normals[probes[p]] : normal;
+                    Vector3 pos = grid.Positions[probes[p]] + n;
 
                     Vector3 delta = light.Origin - pos;
                     float dist2 = delta.LengthSquared();
@@ -1681,7 +2242,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                     float dist = (float)Math.Sqrt(dist2);
                     Vector3 L = delta / dist;
 
-                    if (Vector3.Dot(normal, L) <= 0)
+                    if (Vector3.Dot(n, L) <= 0)
                         continue;                       // luxel faces away
 
                     float dot2 = -Vector3.Dot(L, light.Normal);
@@ -1776,12 +2337,19 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                                    IRayOracle rays,
                                    Vector3[] direct, int start, int end, int generation)
         {
+            Vector3[] normals = grid.Normals;
+            float aoScale = _aoScale;
+
             for (int i = start; i < end; i++)
             {
                 if ((i & 63) == 0 && Volatile.Read(ref _generation) != generation)
                     return;
 
-                Vector3 pos = grid.Positions[i] + normal; // 1 unit off the face (anti-acne)
+                // Displacements shade with the interpolated surface normal; brush faces with
+                // their plane's.
+                Vector3 n = normals != null ? normals[i] : normal;
+
+                Vector3 pos = grid.Positions[i] + n; // 1 unit off the surface (anti-acne)
                 Vector3 sum = Vector3.Zero;
 
                 if (relevant.Count == 0)
@@ -1793,9 +2361,17 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 // vrad multiplies out.m_flDot by the AO term for every light type after
                 // the per-type switch (lightmap.cpp:2269), and every contribution is
                 // linear in that dot — so one factor over the whole sum is equivalent.
-                float ao = aoRays > 0
-                    ? ComputeAmbientOcclusion(pos, normal, rays, aoRays, faceIndex)
-                    : 1.0f;
+                // ao_scale 1 is vrad's term exactly; other strengths raise it to that power
+                // (0 never gets here — the ray count is zero).
+                float ao = 1.0f;
+
+                if (aoRays > 0)
+                {
+                    ao = ComputeAmbientOcclusion(pos, n, rays, aoRays, faceIndex);
+
+                    if (aoScale != 1.0f && ao > 0)
+                        ao = (float)Math.Pow(ao, aoScale);
+                }
 
                 for (int l = 0; l < relevant.Count; l++)
                 {
@@ -1805,19 +2381,19 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                     {
                         case SourceLightType.Point:
                         case SourceLightType.Spot:
-                            sum += SampleStandardLight(light, pos, normal, rays, faceIndex);
+                            sum += SampleStandardLight(light, pos, n, rays, faceIndex);
                             break;
 
                         case SourceLightType.Surface:
-                            sum += SampleSurfaceLight(light, pos, normal, rays, faceIndex);
+                            sum += SampleSurfaceLight(light, pos, n, rays, faceIndex);
                             break;
 
                         case SourceLightType.SkyLight:
-                            sum += SampleSkyLight(light, pos, normal, rays, faceIndex, sunRays, i);
+                            sum += SampleSkyLight(light, pos, n, rays, faceIndex, sunRays, i);
                             break;
 
                         case SourceLightType.SkyAmbient:
-                            sum += SampleSkyAmbient(light, pos, normal, rays, faceIndex, skyDirs);
+                            sum += SampleSkyAmbient(light, pos, n, rays, faceIndex, skyDirs);
                             break;
                     }
                 }
@@ -2051,6 +2627,146 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             return dl.Intensity * (sumVisible / sumDot);
         }
 
+        // ==================== ambient cubes for models ====================
+
+        private static readonly Vector3[] CubeAxes =
+        {
+            new Vector3(1, 0, 0), new Vector3(-1, 0, 0),
+            new Vector3(0, 1, 0), new Vector3(0, -1, 0),
+            new Vector3(0, 0, 1), new Vector3(0, 0, -1),
+        };
+
+        /// <summary>Indirect-light rays per cube face.</summary>
+        private const int ProbeIndirectRays = 48;
+
+        /// <summary>
+        /// Light each probe's model with an ambient cube: for each of the six axis directions,
+        /// every light's direct contribution through the same kernels the luxels use (falloff,
+        /// cone, sun and sky visibility, shadow rays), plus the indirect light arriving from
+        /// the baked surfaces around it — the radiance of whatever face a cosine-weighted ray
+        /// hits, read off that face's lightmap (direct + bounce) times its reflectivity.
+        ///
+        /// That is what VRAD gathers for its per-leaf ambient cubes and what Hammer++ hands
+        /// its props; folding the direct lights into the cube as well, rather than passing the
+        /// strongest few to the shader as local lights, keeps their shadows (the engine's
+        /// local lights have none) at the cost of no per-vertex falloff across a big model.
+        /// </summary>
+        private void ComputeProbes(List<LightProbe> probes, List<BakeFace> faces, List<SourceLight> lights,
+                                   RayBvh bvh, int generation)
+        {
+            int sunRays = SunRays(2);
+            Vector3[] skyDirs = SphereDirections.Table(SkyRays(2));
+
+            Vector3[][] indirectDirs = new Vector3[6][];
+            for (int a = 0; a < 6; a++)
+                indirectDirs[a] = SphereDirections.CosineHemisphereTable(CubeAxes[a], ProbeIndirectRays);
+
+            Action<int> computeOne = index =>
+            {
+                if (Volatile.Read(ref _generation) != generation)
+                    return;
+
+                LightProbe probe = probes[index];
+                Vector3 pos = probe.Position;
+                int skip = probe.SkipId;
+                IRayOracle rays = new ProbeRayOracle(bvh, skip);
+
+                List<SourceLight> relevant = new List<SourceLight>();
+                foreach (SourceLight light in lights)
+                {
+                    if (!UseInCluster(light, pos, 0))
+                        continue;
+
+                    float radius = light.CullRadius();
+                    if (radius < float.MaxValue && (light.Origin - pos).LengthSquared() > radius * radius)
+                        continue;
+
+                    relevant.Add(light);
+                }
+
+                Vector3[] cube = new Vector3[6];
+
+                for (int a = 0; a < 6; a++)
+                {
+                    Vector3 n = CubeAxes[a];
+                    Vector3 sum = Vector3.Zero;
+
+                    foreach (SourceLight light in relevant)
+                    {
+                        switch (light.Type)
+                        {
+                            case SourceLightType.Point:
+                            case SourceLightType.Spot:
+                                sum += SampleStandardLight(light, pos, n, rays, skip);
+                                break;
+                            case SourceLightType.Surface:
+                                sum += SampleSurfaceLight(light, pos, n, rays, skip);
+                                break;
+                            case SourceLightType.SkyLight:
+                                sum += SampleSkyLight(light, pos, n, rays, skip, sunRays, index * 7 + a);
+                                break;
+                            case SourceLightType.SkyAmbient:
+                                sum += SampleSkyAmbient(light, pos, n, rays, skip, skyDirs);
+                                break;
+                        }
+                    }
+
+                    sum += GatherIndirect(pos, indirectDirs[a], faces, bvh, skip);
+                    cube[a] = Vector3.Max(sum, Vector3.Zero);
+                }
+
+                if (Volatile.Read(ref _generation) != generation)
+                    return;
+
+                probe.Cube = cube;
+                probe.Version++;
+            };
+
+            if (probes.Count < 8)
+            {
+                for (int i = 0; i < probes.Count; i++)
+                    computeOne(i);
+            }
+            else
+            {
+                Parallel.For(0, probes.Count, ParallelOpts, computeOne);
+            }
+        }
+
+        /// <summary>Mean radiance seen along cosine-weighted directions: the baked faces' light × reflectivity.</summary>
+        private static Vector3 GatherIndirect(Vector3 pos, Vector3[] dirs, List<BakeFace> faces, RayBvh bvh, int skip)
+        {
+            Vector3 sum = Vector3.Zero;
+
+            for (int m = 0; m < dirs.Length; m++)
+            {
+                ProbeRayOracle.Hit hit;
+                if (!ProbeRayOracle.ClosestHitPast(bvh, pos, dirs[m], skip, out hit))
+                    continue;
+
+                if (hit.Id < 0 || hit.Id >= faces.Count || (hit.Flags & RayTriangleFlags.Sky) != 0)
+                    continue;
+
+                BakeFace face = faces[hit.Id];
+                LuxelGrid grid = face.Grid;
+                Vector3[] direct = face.Direct;
+
+                if (grid == null || direct == null || !face.WantsLightmap)
+                    continue;
+
+                Vector3 point = hit.Point;
+                Vector3 radiance = SampleGrid(grid, direct, point);
+
+                PatchLighting bounce = face.Bounce;
+                if (bounce != null && bounce.Grid != null)
+                    radiance += SampleGrid(bounce.Grid, bounce.Indirect, point);
+
+                sum += radiance * face.Reflectivity;
+            }
+
+            return sum / dirs.Length;
+        }
+
         // ==================== bounce (Monte Carlo radiosity, replaces vrad transfers) ====================
 
         /// <summary>
@@ -2105,7 +2821,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 if (patches == null)
                 {
                     float patchSize = Math.Max(1, face.LightmapScale) * PatchCoarsen;
-                    patches = LuxelGrid.Build(face.Winding, face.Normal, face.AxisU, face.AxisV, patchSize);
+                    patches = BuildGrid(face, patchSize);
                     face.PatchGridCache = patches;
                 }
 
@@ -2138,30 +2854,40 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                     // First iteration shoots direct light scaled by reflectivity
                     // (vrad: emitlight = totallight; the shooter's reflectivity is
                     // folded in at shoot time — same product either way).
-                    emit[f][p] = SampleGrid(face.Grid, face.Direct, patches.Positions[p]) * face.Reflectivity;
+                    emit[f][p] = SampleGrid(face.Grid, face.Direct, patches.LatticePosition(p)) * face.Reflectivity;
                 }
             }
 
             // 2. Iterate gathers. Parallel ACROSS faces (each face's writes are its own
             //    arrays; reads of emit[] are stable within an iteration), with the rare
-            //    huge patch grid additionally split internally.
+            //    huge patch grid additionally split internally. On the GPU when one is
+            //    tracing — this runs on the worker thread, where its context is current.
+            GpuBatchOracle gpu = ResolveGpuOracle(bvh);
+
             for (int iteration = 0; iteration < BounceIterations; iteration++)
             {
                 int iter = iteration;
 
-                Parallel.For(0, n, ParallelOpts, (f, state) =>
+                if (gpu != null)
                 {
-                    if (grids[f] == null || !solve[f])
-                        return;
-
-                    if (Volatile.Read(ref _generation) != generation)
+                    GatherOnGpu(faces, grids, emit, gathered, solve, n, iter, bvh, generation, raysPerPatch, gpu);
+                }
+                else
+                {
+                    Parallel.For(0, n, ParallelOpts, (f, state) =>
                     {
-                        state.Stop();
-                        return;
-                    }
+                        if (grids[f] == null || !solve[f])
+                            return;
 
-                    GatherFacePatches(faces, grids, emit, gathered, f, n, iter, bvh, generation, raysPerPatch);
-                });
+                        if (Volatile.Read(ref _generation) != generation)
+                        {
+                            state.Stop();
+                            return;
+                        }
+
+                        GatherFacePatches(faces, grids, emit, gathered, f, n, iter, bvh, generation, raysPerPatch);
+                    });
+                }
 
                 if (Volatile.Read(ref _generation) != generation)
                     return; // aborted — faces keep their previous bounce
@@ -2187,7 +2913,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                         for (int p = 0; p < held_count; p++)
                         {
                             emit[f][p] = held != null && held.Grid != null
-                                ? SampleGrid(held.Grid, held.Indirect, grids[f].Positions[p]) * reflectivity
+                                ? SampleGrid(held.Grid, held.Indirect, grids[f].LatticePosition(p)) * reflectivity
                                 : Vector3.Zero;
                         }
 
@@ -2288,18 +3014,16 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             BakeFace face = faces[f];
             LuxelGrid patches = grids[f];
             int pcount = patches.Width * patches.Height;
-            Vector3 normal = face.Normal;
 
-            // One direction set for the whole face: see CosineHemisphereTable for why
-            // per-patch directions are what produced the blotching.
-            Vector3[] dirs = SphereDirections.CosineHemisphereTable(normal, raysPerPatch);
+            Vector3[] faceDirs = SphereDirections.CosineHemisphereTable(face.Normal, raysPerPatch);
 
             for (int p = 0; p < pcount; p++)
             {
                 if ((p & 63) == 0 && Volatile.Read(ref _generation) != generation)
                     return;
 
-                Vector3 origin = patches.Positions[p] + normal;
+                Vector3 origin;
+                Vector3[] dirs = PatchRays(face, patches, p, faceDirs, raysPerPatch, out origin);
                 Vector3 sum = Vector3.Zero;
 
                 for (int m = 0; m < dirs.Length; m++)
@@ -2307,22 +3031,13 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                     Vector3 dir = dirs[m];
 
                     RayHit hit;
-                    if (!bvh.ClosestHit(origin, dir, 1.0e6f, out hit))
+                    if (!bvh.ClosestHit(origin, dir, BounceRayLength, out hit))
                         continue;
 
                     if ((hit.Flags & RayTriangleFlags.Sky) != 0)
                         continue; // sky handled by the direct sky-ambient term
 
-                    int hitFace = hit.Id;
-                    if (hitFace < 0 || hitFace >= n || grids[hitFace] == null)
-                        continue;
-
-                    // Light only leaves the front of a face.
-                    if (Vector3.Dot(faces[hitFace].Normal, dir) >= 0)
-                        continue;
-
-                    Vector3 hitPoint = origin + dir * hit.T;
-                    sum += SampleGrid(grids[hitFace], emit[hitFace], hitPoint);
+                    sum += GatheredFrom(faces, grids, emit, n, origin, dir, hit.Id, hit.T);
                 }
 
                 // cosine-weighted MC: E = average of emitted radiosity over rays
@@ -2330,6 +3045,179 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             }
         }
 
+        /// <summary>How far a bounce ray looks for the face it gathers from.</summary>
+        private const float BounceRayLength = 1.0e6f;
+
+        /// <summary>
+        /// Where a patch gathers from, and along which directions. One direction set serves
+        /// the whole face — see CosineHemisphereTable for why per-patch directions are what
+        /// produced the blotching. A displacement is the exception: its patches face
+        /// different ways, so each gets the same sequence rotated onto its own normal (still
+        /// correlated between neighbours).
+        /// </summary>
+        private static Vector3[] PatchRays(BakeFace face, LuxelGrid patches, int p, Vector3[] faceDirs,
+                                           int raysPerPatch, out Vector3 origin)
+        {
+            Vector3 patchNormal = face.Normal;
+            Vector3[] dirs = faceDirs;
+
+            if (patches.Normals != null)
+            {
+                patchNormal = patches.Normals[p];
+                dirs = SphereDirections.CosineHemisphereTable(patchNormal, raysPerPatch);
+            }
+
+            origin = patches.Positions[p] + patchNormal;
+            return dirs;
+        }
+
+        /// <summary>
+        /// The light a bounce ray brings back from the face it hit — nothing for a hit on no
+        /// face, or on the back of one, since light only leaves the front.
+        /// </summary>
+        private static Vector3 GatheredFrom(List<BakeFace> faces, LuxelGrid[] grids, Vector3[][] emit, int n,
+                                           Vector3 origin, Vector3 dir, int hitFace, float t)
+        {
+            if (hitFace < 0 || hitFace >= n || grids[hitFace] == null)
+                return Vector3.Zero;
+
+            if (Vector3.Dot(faces[hitFace].Normal, dir) >= 0)
+                return Vector3.Zero;
+
+            return SampleGrid(grids[hitFace], emit[hitFace], origin + dir * t);
+        }
+
+        /// <summary>
+        /// One bounce iteration's gather with its rays traced on the GPU: faces are packed a
+        /// dispatch at a time, in parallel, traced from this (the worker) thread, then
+        /// gathered from the answers in parallel. The rays are the CPU gather's exactly —
+        /// same origins, directions and length — so the two differ only where the GPU's
+        /// float arithmetic lands a hit differently.
+        ///
+        /// A dispatch that fails gathers its faces, and every face after them, on the CPU.
+        /// </summary>
+        private void GatherOnGpu(List<BakeFace> faces, LuxelGrid[] grids, Vector3[][] emit,
+                                 Vector3[][] gathered, bool[] solve, int n, int iteration, RayBvh bvh,
+                                 int generation, int raysPerPatch, GpuBatchOracle gpu)
+        {
+            List<int> chunk = new List<int>();
+            List<int> offsets = new List<int>();
+            int[] hitFaces = null;
+            float[] hitDistances = null;
+            int next = 0;
+
+            while (next < n)
+            {
+                if (Volatile.Read(ref _generation) != generation)
+                    return;
+
+                // A dispatch's worth of whole faces; a face larger than that goes alone.
+                chunk.Clear();
+                offsets.Clear();
+                int total = 0;
+
+                for (; next < n; next++)
+                {
+                    if (grids[next] == null || !solve[next])
+                        continue;
+
+                    int rays = grids[next].Width * grids[next].Height * raysPerPatch;
+
+                    if (total > 0 && total + rays > gpu.MaxRaysPerDispatch)
+                        break;
+
+                    chunk.Add(next);
+                    offsets.Add(total);
+                    total += rays;
+                }
+
+                if (chunk.Count == 0)
+                    break;
+
+                float[] staging = gpu != null ? gpu.ClosestStaging(total) : null;
+
+                if (staging != null)
+                {
+                    Parallel.For(0, chunk.Count, ParallelOpts,
+                        i => PackPatchRays(faces[chunk[i]], grids[chunk[i]], raysPerPatch, staging, offsets[i]));
+
+                    if (hitFaces == null || hitFaces.Length < total)
+                    {
+                        hitFaces = new int[total];
+                        hitDistances = new float[total];
+                    }
+
+                    if (!gpu.TraceClosest(total, hitFaces, hitDistances))
+                        staging = null;
+                }
+
+                if (staging == null)
+                {
+                    // No GPU for this chunk — too large to stage, or the dispatch failed —
+                    // and after a failure none for the rest of this bake either.
+                    gpu = null;
+
+                    Parallel.For(0, chunk.Count, ParallelOpts, i => GatherFacePatches(
+                        faces, grids, emit, gathered, chunk[i], n, iteration, bvh, generation, raysPerPatch));
+                    continue;
+                }
+
+                int[] answeredFaces = hitFaces;
+                float[] answeredDistances = hitDistances;
+
+                Parallel.For(0, chunk.Count, ParallelOpts, i => GatherPatchHits(
+                    faces, grids, emit, gathered, chunk[i], n, raysPerPatch, answeredFaces, answeredDistances,
+                    offsets[i]));
+            }
+        }
+
+        /// <summary>Pack a face's bounce rays, patch by patch, from <paramref name="first"/>.</summary>
+        private static void PackPatchRays(BakeFace face, LuxelGrid patches, int raysPerPatch, float[] staging, int first)
+        {
+            Vector3[] faceDirs = SphereDirections.CosineHemisphereTable(face.Normal, raysPerPatch);
+            int pcount = patches.Width * patches.Height;
+            int at = first;
+
+            for (int p = 0; p < pcount; p++)
+            {
+                Vector3 origin;
+                Vector3[] dirs = PatchRays(face, patches, p, faceDirs, raysPerPatch, out origin);
+
+                for (int m = 0; m < dirs.Length; m++)
+                {
+                    GpuRayTracer.PackRay(staging, at++, origin, dirs[m], BounceRayLength, NoSkip,
+                        GpuRayTracer.ModeClosestHit, RayTriangleFlags.None);
+                }
+            }
+        }
+
+        /// <summary>
+        /// <see cref="GatherFacePatches"/> with the hits already traced: the same sum, over the
+        /// same rays in the same order, read from the GPU's answers.
+        /// </summary>
+        private static void GatherPatchHits(List<BakeFace> faces, LuxelGrid[] grids, Vector3[][] emit,
+                                            Vector3[][] gathered, int f, int n, int raysPerPatch,
+                                            int[] hitFaces, float[] hitDistances, int first)
+        {
+            BakeFace face = faces[f];
+            LuxelGrid patches = grids[f];
+            int pcount = patches.Width * patches.Height;
+
+            Vector3[] faceDirs = SphereDirections.CosineHemisphereTable(face.Normal, raysPerPatch);
+            int at = first;
+
+            for (int p = 0; p < pcount; p++)
+            {
+                Vector3 origin;
+                Vector3[] dirs = PatchRays(face, patches, p, faceDirs, raysPerPatch, out origin);
+                Vector3 sum = Vector3.Zero;
+
+                for (int m = 0; m < dirs.Length; m++, at++)
+                    sum += GatheredFrom(faces, grids, emit, n, origin, dirs[m], hitFaces[at], hitDistances[at]);
+
+                gathered[f][p] = sum / dirs.Length;
+            }
+        }
         /// <summary>Bilinear lookup of a per-luxel/per-patch array at a world position.</summary>
         private static Vector3 SampleGrid(LuxelGrid grid, Vector3[] data, Vector3 worldPos)
         {
@@ -2384,7 +3272,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 Vector3 v = direct[i];
 
                 if (bounce != null && bounce.Grid != null)
-                    v += SampleGrid(bounce.Grid, bounce.Indirect, grid.Positions[i]);
+                    v += SampleGrid(bounce.Grid, bounce.Indirect, grid.LatticePosition(i));
 
                 rgb[i * 3 + 0] = Encode(v.X);
                 rgb[i * 3 + 1] = Encode(v.Y);
@@ -2445,6 +3333,83 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
     }
 
     /// <summary>
+    /// Visibility for a probe that sits inside its own model (a static prop's centre): every
+    /// query looks straight through that model's triangles, so the prop neither shadows nor
+    /// hides the sky from its own ambient cube. Other geometry blocks as usual.
+    /// </summary>
+    internal sealed class ProbeRayOracle : IRayOracle
+    {
+        private readonly RayBvh _bvh;
+        private readonly int _skip;
+
+        public ProbeRayOracle(RayBvh bvh, int skip)
+        {
+            _bvh = bvh;
+            _skip = skip;
+        }
+
+        public bool SupportsConcurrentUse { get { return true; } }
+
+        public bool AnyHit(Vector3 origin, Vector3 direction, float tmax, int skipId, RayTriangleFlags ignoreFlags)
+        {
+            return _bvh.AnyHit(origin, direction, tmax, _skip, ignoreFlags);
+        }
+
+        public bool ReachesSky(Vector3 origin, Vector3 direction, float tmax)
+        {
+            Hit hit;
+
+            if (!ClosestHitPast(_bvh, origin, direction, _skip, out hit, tmax))
+                return true;   // left the map, as BvhRayOracle
+
+            return (hit.Flags & RayTriangleFlags.Sky) != 0;
+        }
+
+        /// <summary>A probe's closest-hit query, stepping past any triangle tagged <paramref name="skip"/>.</summary>
+        public struct Hit
+        {
+            public int Id;
+            public RayTriangleFlags Flags;
+            public Vector3 Point;
+        }
+
+        public static bool ClosestHitPast(RayBvh bvh, Vector3 origin, Vector3 direction, int skip, out Hit result,
+                                          float tmax = 1.0e6f)
+        {
+            result = new Hit { Id = -1 };
+            Vector3 from = origin;
+            float remaining = tmax;
+
+            // A few steps: a ray can leave a closed model through several of its triangles.
+            for (int step = 0; step < 8; step++)
+            {
+                RayHit hit;
+                if (!bvh.ClosestHit(from, direction, remaining, out hit))
+                    return false;
+
+                Vector3 point = from + direction * hit.T;
+
+                if (hit.Id == skip && skip != int.MinValue)
+                {
+                    const float Nudge = 0.05f;
+                    from = point + direction * Nudge;
+                    remaining -= hit.T + Nudge;
+
+                    if (remaining <= 0)
+                        return false;
+
+                    continue;
+                }
+
+                result = new Hit { Id = hit.Id, Flags = hit.Flags, Point = point };
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Deterministic direction tables — vrad's DirectionalSampler_t role. Fixed tables
     /// keep the lightmaps noise-free across luxels (every luxel integrates the same
     /// directions), exactly like vrad's shared sampler sequence — and make recomputes
@@ -2452,15 +3417,23 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
     /// </summary>
     internal static class SphereDirections
     {
-        private static readonly Dictionary<int, Vector3[]> _tables = new Dictionary<int, Vector3[]>();
+        /// <summary>
+        /// Copy-on-write: asked once per luxel from every bake thread, so a hit must not
+        /// take a lock — a shared one serialised the parallel face bakes on it. Only a miss,
+        /// which happens once per table size, locks and publishes a new dictionary.
+        /// </summary>
+        private static volatile Dictionary<int, Vector3[]> _tables = new Dictionary<int, Vector3[]>();
         private static readonly object _gate = new object();
 
         /// <summary>N roughly-uniform directions on the full sphere (Fibonacci spiral).</summary>
         public static Vector3[] Table(int n)
         {
+            Vector3[] table;
+            if (_tables.TryGetValue(n, out table))
+                return table;
+
             lock (_gate)
             {
-                Vector3[] table;
                 if (_tables.TryGetValue(n, out table))
                     return table;
 
@@ -2475,7 +3448,9 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                     table[i] = new Vector3((float)(r * Math.Cos(phi)), (float)(r * Math.Sin(phi)), (float)z);
                 }
 
-                _tables[n] = table;
+                Dictionary<int, Vector3[]> next = new Dictionary<int, Vector3[]>(_tables);
+                next[n] = table;
+                _tables = next;
                 return table;
             }
         }

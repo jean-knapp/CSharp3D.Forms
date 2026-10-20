@@ -51,6 +51,7 @@
     <Compile Include="Lighting\GpuBatchOracle.cs" />
     <Compile Include="Lighting\GpuRayTracer.cs" />
     <Compile Include="Lighting\LightmapBaker.cs" />
+    <Compile Include="Lighting\LightPreviewSettings.cs" />
     <Compile Include="Lighting\LuxelGrid.cs" />
     <Compile Include="Lighting\RayBvh.cs" />
     <Compile Include="Lighting\RayOracle.cs" />

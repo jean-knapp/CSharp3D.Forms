@@ -79,6 +79,13 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// <summary>sin(SunSpreadAngle) for soft sun sampling (vrad g_SunAngularExtent).</summary>
         public float SunAngularExtent;
 
+        /// <summary>
+        /// Multiplier on <see cref="CullRadius"/> — the preview's <c>radius_scale</c> setting
+        /// (Hammer++ scales every light's cull radius the same way). Below 1 trades the dim
+        /// tail of a light's falloff for speed; above 1 keeps more of it.
+        /// </summary>
+        public float RadiusScale = 1.0f;
+
         /// <summary>Whatever the caller wants to track the light back to (its entity).</summary>
         public object SourceKey;
 
@@ -107,7 +114,23 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// used for face culling (replaces vrad's per-light PVS, which is a speedup
         /// only). Infinite for sun/sky and no-falloff lights.
         /// </summary>
+        /// <summary>A field-for-field copy (every field is a value or an opaque key).</summary>
+        public SourceLight Clone()
+        {
+            return (SourceLight)MemberwiseClone();
+        }
+
         public float CullRadius()
+        {
+            float radius = UnscaledCullRadius();
+
+            if (radius >= float.MaxValue || RadiusScale == 1.0f)
+                return radius;
+
+            return radius * RadiusScale;
+        }
+
+        private float UnscaledCullRadius()
         {
             if (Type == SourceLightType.SkyLight || Type == SourceLightType.SkyAmbient)
                 return float.MaxValue;
