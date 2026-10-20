@@ -1,4 +1,4 @@
-﻿#version 330 core
+#version 330 core
 
 #define MAX_LIGHTS 8  // Change this value to support more/fewer lights (must match C# MAX_LIGHTS)
 
@@ -13,6 +13,14 @@ out vec3 fragLightPosition[MAX_LIGHTS];
 out vec3 fragCameraPosition;
 
 in vec2 geomTexCoord[];	// The texture coordinates for the geometry
+in float geomBlend[];		// The blend weight for the geometry
+out float fragBlend;		// ... passed on to the fragment shader
+in vec3 geomLightmapPosition[];	// Lightmap lattice position (LitIndexedMesh)
+out vec3 fragLightmapPosition;	// ... passed on to the fragment shader
+in vec2 geomLightmapCoord[];	// Atlas luxel coordinates (AtlasLitMesh)
+out vec2 fragLightmapCoord;
+in vec4 geomLightmapSlot[];	// Atlas slot (AtlasLitMesh)
+out vec4 fragLightmapSlot;
 in vec3 geomNormal[]; 	// The normal vector for the geometry
 in vec3 geomPosition[]; 	// The transformed vertex position for the geometry
 in vec3 geomWorldPosition[];	// The world-space position for the geometry
@@ -56,6 +64,10 @@ void main()
     for (int i = 0; i < gl_in.length(); i++)
 	{
 		fragTexCoord = geomTexCoord[i];
+		fragBlend = geomBlend[i];
+		fragLightmapPosition = geomLightmapPosition[i];
+		fragLightmapCoord = geomLightmapCoord[i];
+		fragLightmapSlot = geomLightmapSlot[i];
 		fragNormal = geomNormal[i];
 		fragWorldPosition = geomWorldPosition[i];
 

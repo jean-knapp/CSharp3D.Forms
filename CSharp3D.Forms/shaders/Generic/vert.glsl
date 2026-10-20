@@ -1,10 +1,19 @@
-﻿#version 330 core
+#version 330 core
 
 #define MAX_LIGHTS 8  // Change this value to support more/fewer lights (must match C# MAX_LIGHTS)
 
 layout(location = 0) in vec3 inPosition;    // 3D position of the vertex
 layout(location = 1) in vec3 inNormal;      // Normal vector of the vertex (used for lighting and shading)
 layout(location = 2) in vec2 inTexCoord;    // Texture coordinates of the vertex
+layout(location = 3) in float inBlend;      // Blend weight (IndexedMesh.BlendWeights); 0 when the mesh has none
+layout(location = 4) in vec3 inLightmapPosition; // LitIndexedMesh.LightmapPositions; unbound (unused) otherwise
+layout(location = 5) in vec2 inLightmapCoord;    // AtlasLitMesh: luxel coordinates in the lightmap atlas
+layout(location = 6) in vec4 inLightmapSlot;     // AtlasLitMesh: the face's atlas slot (x, y, w, h), w 0 = not baked
+
+out float geomBlend;       // Pass the blend weight on
+out vec3 geomLightmapPosition; // Lightmap lattice position, same space as geomWorldPosition
+out vec2 geomLightmapCoord;
+out vec4 geomLightmapSlot;
 
 out vec2 geomTexCoord;     // Pass the texture coordinates to the geometry shader
 out vec3 geomNormal;       // Pass the normal vector to the geometry shader for lighting calculations
@@ -35,7 +44,11 @@ void main()
     // not rotated -- invisible while the only light was a point light near the object, but
     // obvious under a directional light, where the shading is pure dot(N, sunDir).
     geomNormal = normalize(mat3(uModel) * inNormal);
-    geomTexCoord = inTexCoord; 
+    geomTexCoord = inTexCoord;
+    geomBlend = inBlend;
+    geomLightmapPosition = vec3(uModel * vec4(inLightmapPosition, 1.0));
+    geomLightmapCoord = inLightmapCoord;
+    geomLightmapSlot = inLightmapSlot;
 
     geomModel = uModel;
     // Light positions are handled as uniforms in geometry shader
