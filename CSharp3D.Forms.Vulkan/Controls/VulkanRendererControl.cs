@@ -75,6 +75,14 @@ namespace CSharp3D.Forms.Vulkan.Controls
         private Thread _thread;
         private readonly AutoResetEvent _wake = new AutoResetEvent(false);
         private volatile bool _stopping;
+
+        /// <summary>
+        /// The view has let go of its timer and its wake event. Set BEFORE the letting go
+        /// starts, because the tail of Dispose lays the control out one last time: taking a
+        /// docked child out of its parent resizes it and changes its visibility, and those
+        /// handlers ask for a frame. By then the event is a closed handle.
+        /// </summary>
+        private volatile bool _disposed;
         private volatile bool _frameRequested;
         private volatile bool _paused;
         private volatile CameraPose _pose;
@@ -489,6 +497,11 @@ namespace CSharp3D.Forms.Vulkan.Controls
         /// <summary>Stop the thread and let go of everything Vulkan. UI thread.</summary>
         private void TearDown()
         {
+            // Dispose runs this before closing the handles, and a failure can run it again
+            // afterwards; the second time there is nothing left to stop.
+            if (_disposed)
+                return;
+
             _pump.Stop();
 
             Thread thread = _thread;
@@ -537,6 +550,9 @@ namespace CSharp3D.Forms.Vulkan.Controls
             if (disposing)
             {
                 TearDown();
+
+                _disposed = true;
+
                 _pump.Dispose();
                 _wake.Dispose();
             }
@@ -581,6 +597,10 @@ namespace CSharp3D.Forms.Vulkan.Controls
         protected override void OnVisibleChanged(EventArgs e)
         {
             base.OnVisibleChanged(e);
+
+            // Disposing a docked child hides it as it leaves its parent, which arrives here.
+            if (_disposed)
+                return;
 
             // A hidden view has no one to render for; the thread idles until it is back.
             _paused = !Visible;
@@ -640,9 +660,6 @@ namespace CSharp3D.Forms.Vulkan.Controls
 
                     FitSurface();
 
-                    // The frame in flight reads the buffers the sync may replace.
-                    _tracer.WaitForGpu();
-
                     if (UseSceneLights)
                     {
                         Vector3 sky;
@@ -694,7 +711,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
         /// <summary>Hand the render thread the camera as it is now. UI thread.</summary>
         private void PushCamera()
         {
-            if (Camera == null || _tracer == null)
+            if (_disposed || Camera == null || _tracer == null)
                 return;
 
             Size size = _surfaceSize;
@@ -729,6 +746,9 @@ namespace CSharp3D.Forms.Vulkan.Controls
 
         private void RequestFrame()
         {
+            if (_disposed)
+                return;
+
             _frameRequested = true;
             _wake.Set();
         }
@@ -810,6 +830,9 @@ namespace CSharp3D.Forms.Vulkan.Controls
 
         private void EnsurePumping()
         {
+            if (_disposed)
+                return;
+
             if (!_pump.Enabled)
             {
                 _lastPumpSeconds = 0;
@@ -877,6 +900,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
         private void RenderLoop()
         {
             Stopwatch frameClock = new Stopwatch();
+            Stopwatch gpuClock = new Stopwatch();
             double lastFrameSeconds = 0;
 
             while (!_stopping)
@@ -885,6 +909,13 @@ namespace CSharp3D.Forms.Vulkan.Controls
 
                 try
                 {
+                    // The frame in flight finishes outside the gate, so a paint never queues
+                    // behind a frame that is only waiting for the GPU. TearDown joins this
+                    // thread before the tracer goes, so it cannot vanish under the wait.
+                    gpuClock.Restart();
+                    _tracer?.WaitForGpu();
+                    gpuClock.Stop();
+
                     lock (_gate)
                     {
                         if (_tracer == null)
@@ -917,7 +948,8 @@ namespace CSharp3D.Forms.Vulkan.Controls
                             }
                             else
                             {
-                                AdaptSamplesPerFrame(frameClock.Elapsed.TotalMilliseconds);
+                                // What the GPU took for the last frame counts, not just recording this one.
+                                AdaptSamplesPerFrame(frameClock.Elapsed.TotalMilliseconds + gpuClock.Elapsed.TotalMilliseconds);
                             }
 
                             rendered = true;
