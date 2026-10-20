@@ -1,7 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net472</TargetFramework>
+    <!-- A shared library: other projects still target .NET Framework 4.7.2, so it always builds
+         both. XBLAH's Modding Tool uses net10.0-windows (net10-port-plan.md in modding-tool-dev3).
+         net472 comes first, so the VS designer keeps the .NET Framework designer for this library. -->
+    <TargetFrameworks>net472;net10.0-windows</TargetFrameworks>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <PlatformTarget>x64</PlatformTarget>
@@ -13,6 +16,13 @@
     <!-- The GL project it shares a scene model with is AnyCPU; this one binds a native RT
          driver and is 64-bit only. Nothing 32-bit consumes it. -->
     <ResolveAssemblyWarnOrErrorOnTargetArchitectureMismatch>None</ResolveAssemblyWarnOrErrorOnTargetArchitectureMismatch>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <!-- Windows-only, so the platform-compatibility analyzer (CA1416) has nothing to report.
+         WFO1000 wants every public control property to declare its designer serialization; the
+         defaults it would spell out are the ones net472 already applies (net10-port-plan.md). -->
+    <NoWarn>$(NoWarn);CA1416;WFO1000</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
