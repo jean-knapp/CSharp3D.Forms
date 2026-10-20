@@ -1,4 +1,4 @@
-#version 460
+﻿#version 460
 #include "common.glsl"
 
 // The whole renderer, per pixel: camera rays, direct light with shadow rays at every hit, one
@@ -29,19 +29,20 @@ layout(set = 0, binding = 4, scalar) buffer Lights { Light lights[]; };
 // has accumulated so far, with the count in alpha.
 layout(set = 0, binding = 5, rgba32f) uniform image2D positions[2];   // xyz world, w 1 for a hit, 0 for sky
 layout(set = 0, binding = 6, rgba16f) uniform image2D normals[2];     // xyz shading normal, w distance from the eye
-layout(set = 0, binding = 7, rgba16f) uniform image2D directs[2];     // rgb direct radiance (albedo in), a samples
-layout(set = 0, binding = 8, rgba16f) uniform image2D indirects[2];   // rgb indirect irradiance (albedo out), a samples
-layout(set = 0, binding = 9, rgba16f) uniform image2D albedos[2];     // rgb mean albedo of the first hits, a samples
+layout(set = 0, binding = 7, rgba32f) uniform image2D directs[2];     // rgb direct radiance (albedo in), a samples
+layout(set = 0, binding = 8, rgba32f) uniform image2D indirects[2];   // rgb indirect irradiance (albedo out), a samples
+layout(set = 0, binding = 9, rgba32f) uniform image2D albedos[2];     // rgb mean albedo of the first hits, a samples
 
-layout(set = 0, binding = 10) uniform sampler2D textures[];
+layout(set = 0, binding = 10, scalar) buffer Emitters { Emitter emitters[]; };
+
+layout(set = 0, binding = 11) uniform sampler2D textures[];
 
 layout(location = 0) rayPayloadEXT HitPayload hit;
 layout(location = 1) rayPayloadEXT float shadowT;   // < 0 when the shadow ray reached the light
 
-// Which instances a ray may hit. Sky faces are their own instance so that primary rays
-// see them (and show sky) while shadow rays pass straight through them to the sun.
-const uint MASK_OPAQUE = 0x1u;
-const uint MASK_SKY    = 0x2u;
+// Which instances a ray may hit (the MASK_* bits in common.glsl). Sky faces are their own
+// instance so that primary rays see them (and show sky) while shadow rays pass straight
+// through them to the sun.
 
 const float RAY_EPSILON = 0.05;     // world units, off the surface before the next ray
 const float RAY_FAR     = 1.0e6;
@@ -74,7 +75,7 @@ bool visible(vec3 origin, vec3 direction, float maxDistance)
 
     traceRayEXT(scene,
         gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-        MASK_OPAQUE, 0, 0, 1,
+        MASK_OCCLUDER, 0, 0, 1,
         origin, RAY_EPSILON, direction, maxDistance, 1);
 
     return shadowT < 0.0;
@@ -201,6 +202,61 @@ vec3 directLight(vec3 p, vec3 n, vec3 v, vec3 albedo, float roughness, inout uin
     return sum;
 }
 
+// ---- the sky -------------------------------------------------------------------------------
+
+// What a ray sees when it leaves the world, or passes through a sky face: the skybox in that
+// direction, or the flat sky colour when there is none. The face selection is the cube's own -
+// +X, -X, +Y, -Y, +Z, -Z, each seen from inside with the viewer's right as +u - the same table
+// the GL sky pass and the CPU preview use, so all three agree on where a picture lands.
+vec3 skyRadiance(vec3 direction)
+{
+    if (frame.skyScale.x <= 0.0)
+        return frame.sky.rgb;
+
+    vec3 d = (vec4(direction, 0.0) * frame.cubeFromWorld).xyz;
+    vec3 a = abs(d);
+
+    int face;
+    float sc, tc, ma;
+
+    if (a.x >= a.y && a.x >= a.z)
+    {
+        ma = a.x;
+        if (d.x > 0.0) { face = 0; sc = d.z;  tc = -d.y; }
+        else           { face = 1; sc = -d.z; tc = -d.y; }
+    }
+    else if (a.y >= a.z)
+    {
+        ma = a.y;
+        if (d.y > 0.0) { face = 2; sc = d.x; tc = -d.z; }
+        else           { face = 3; sc = d.x; tc = d.z; }
+    }
+    else
+    {
+        ma = a.z;
+        if (d.z > 0.0) { face = 4; sc = -d.x; tc = -d.y; }
+        else           { face = 5; sc = d.x;  tc = -d.y; }
+    }
+
+    int index = face < 4 ? frame.skyA[face] : frame.skyB[face - 4];
+
+    if (index < 0)
+        return frame.sky.rgb;
+
+    vec2 uv = vec2(sc / ma, tc / ma) * 0.5 + 0.5;
+
+    // A 2:1 side face is the sky above the horizon: the engine scales its coordinate by two
+    // and clamps, so the picture fills the upper half and its last row runs to the floor.
+    if ((frame.skyB.z & (1 << face)) != 0)
+        uv.y = min(1.0, uv.y * 2.0);
+
+    // The shared sampler repeats; a face's edge must not borrow from its opposite edge.
+    vec2 size = vec2(textureSize(textures[nonuniformEXT(index)], 0));
+    uv = clamp(uv, 0.5 / size, 1.0 - 0.5 / size);
+
+    return textureLod(textures[nonuniformEXT(index)], uv, 0.0).rgb * frame.skyScale.x;
+}
+
 // ---- one path --------------------------------------------------------------------------------
 
 // What the first hit looks like, kept for the history and the denoiser.
@@ -235,7 +291,7 @@ void tracePath(vec3 origin, vec3 direction, float pixelSpread, inout uint seed, 
     {
         hit.t = -1.0;
 
-        traceRayEXT(scene, gl_RayFlagsOpaqueEXT, MASK_OPAQUE | MASK_SKY, 0, 0, 0,
+        traceRayEXT(scene, gl_RayFlagsOpaqueEXT, MASK_VISIBLE | MASK_SKY, 0, 0, 0,
             origin, bounce == 0u ? 0.0 : RAY_EPSILON, direction, RAY_FAR, 0);
 
         bool sky = hit.t < 0.0;
@@ -251,10 +307,12 @@ void tracePath(vec3 origin, vec3 direction, float pixelSpread, inout uint seed, 
         {
             // Out of the world: what the sky light says is there. For a bounce ray this is
             // the one sky sample the path gets, so it is not counted anywhere else.
+            vec3 seen = skyRadiance(direction);
+
             if (bounce == 0u)
-                direct += frame.sky.rgb;
+                direct += seen;
             else
-                indirect += throughput * frame.sky.rgb;
+                indirect += throughput * seen;
 
             return;
         }
@@ -320,7 +378,7 @@ void tracePath(vec3 origin, vec3 direction, float pixelSpread, inout uint seed, 
             // visibility ray. The cosine pdf cancels Lambert, so a clear sample is
             // exactly albedo x sky.
             if (visible(p, next, RAY_FAR))
-                indirect += throughput * (bounce == 0u ? vec3(1.0) : albedo) * frame.sky.rgb;
+                indirect += throughput * (bounce == 0u ? vec3(1.0) : albedo) * skyRadiance(next);
 
             return;
         }
@@ -331,6 +389,956 @@ void tracePath(vec3 origin, vec3 direction, float pixelSpread, inout uint seed, 
 
         origin = p;
         direction = next;
+    }
+}
+
+// ==== game light models ======================================================================
+//
+// The physical model above is what Lambda Engine's Lumen produces. The models below are what a
+// game shows after a real compile: the compiler's light (VRAD, ZHLT 3.4, ArghRad 2.01) as it
+// would land in the BSP lightmap, then the engine's lightmap x texture formula. Per camera
+// sample the first surface's lighting is evaluated at one of the compiler's luxel sample points
+// - the luxel picked stochastically with the bilinear weights of the point between the four
+// around it, so the accumulation converges to the bilinearly filtered lightmap - and put
+// through the compiler's output transform and the engine's lightmap decode there, per sample,
+// exactly as the clamps and gamma curves apply per luxel in the game.
+//
+// What the buffers hold in a game model:
+//   direct    screen-space light that is already final: the sky, blended and additive layers
+//   indirect  G, the engine's lightmap factor of the first opaque surface (screen = T x G)
+//   albedo    T, the engine's texture term, times what the layers in front let through
+// The compose pass is direct + albedo x indirect, as for the physical model.
+//
+// Model constants (GpuLightModel, set by the host):
+//   ZHLT     A = (dscale, gamma, maxlight, -)   B = (texgamma/gamma, 1/gamma, g3, lightgamma)
+//            C = (brightness, S, K, style 'm')  D = (fade, falloff, -sky, bounce reflectivity)
+//   ArghRad  A = (maxlight, -scale, display x, -) B = (ambient rgb, -)  C = (choplight, chopsky, -, -)
+//   VRAD     A = (1/255: vrad units to L, -, -, -)
+
+float max3(vec3 v)
+{
+    return max(v.x, max(v.y, v.z));
+}
+
+// The closest thing among the masks; false on a miss. Fills `hit`.
+bool traceClosest(vec3 origin, vec3 direction, float tmin, float tmax, uint mask)
+{
+    hit.t = -1.0;
+    traceRayEXT(scene, gl_RayFlagsOpaqueEXT, mask, 0, 0, 0, origin, tmin, direction, tmax, 0);
+    return hit.t >= 0.0;
+}
+
+// A front face in the plane of the back face just hit, by a probe a hair either side of it
+// that the hardware's culling keeps off the back face.
+bool coplanarFront(vec3 point, vec3 direction)
+{
+    hit.t = -1.0;
+    traceRayEXT(scene, gl_RayFlagsOpaqueEXT | gl_RayFlagsCullBackFacingTrianglesEXT,
+        MASK_VISIBLE | MASK_TRANSPARENT | MASK_SKY, 0, 0, 0,
+        point - direction * 0.05, 0.0, direction, 0.1, 0);
+    return hit.t >= 0.0;
+}
+
+// Is the segment clear of everything in the mask?
+bool clearOf(vec3 origin, vec3 direction, float maxDistance, uint mask)
+{
+    shadowT = 0.0;
+
+    traceRayEXT(scene,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+        mask, 0, 0, 1,
+        origin, RAY_EPSILON, direction, maxDistance, 1);
+
+    return shadowT < 0.0;
+}
+
+// What blocks a light in this compiler: solid world brushes; ZHLT's and ArghRad's traces stop
+// at sky brushes too, VRAD's never do.
+uint shadowMask()
+{
+    return frame.model.x == MODEL_VRAD ? MASK_OCCLUDER : (MASK_OCCLUDER | MASK_SKY);
+}
+
+// Does a ray reach the sky before anything that blocks light? VRAD counts a ray that leaves
+// the world as sky (a leak); ZHLT and ArghRad do not. `sun`: the face must let the sun in.
+bool reachesSky(vec3 origin, vec3 direction, bool sun)
+{
+    if (!traceClosest(origin, direction, RAY_EPSILON, RAY_FAR, MASK_OCCLUDER | MASK_SKY))
+        return frame.model.x == MODEL_VRAD;
+
+    uint flags = materials[hit.materialIndex].flags;
+
+    if ((flags & MATERIAL_SKY) == 0u)
+        return false;
+
+    return !sun || (flags & MATERIAL_NOSUN) == 0u;
+}
+
+// ---- one light, as the compiler computes it ----
+
+vec3 zhltLight(Light light, vec3 p, vec3 n, inout uint seed)
+{
+    uint type = uint(light.params.y);
+
+    if (type == LIGHT_SUN)
+    {
+        // lightmap.cpp GatherSampleLight, skylight: I cos, no falloff, the ray must reach sky.
+        float c = -dot(n, light.directionCone.xyz);
+
+        if (c <= 0.001 || !reachesSky(p, -light.directionCone.xyz, true))
+            return vec3(0.0);
+
+        return light.radiance.rgb * c;
+    }
+
+    if (type == LIGHT_SKYDOME)
+    {
+        // The 162-direction diffuse dome; the host folded skyI x the dome's cosine sum into radiance.
+        vec3 d = cosineSample(n, seed);
+        return reachesSky(p, d, false) ? light.radiance.rgb : vec3(0.0);
+    }
+
+    vec3 delta = light.positionRadius.xyz - p;
+    float distance = length(delta);
+    vec3 l = delta / max(distance, 1.0e-4);
+    float c = dot(n, l);
+
+    if (c <= 0.001)
+        return vec3(0.0);
+
+    float d = max(distance, 1.0);
+    float fade = light.atten.x;
+    float falloff = d * fade * (light.atten.w > 1.5 ? d : 1.0);
+    vec3 add = light.radiance.rgb * c / falloff;
+
+    if (type == LIGHT_SPOT)
+    {
+        float c2 = -dot(l, light.directionCone.xyz);
+        float stopdot2 = light.directionCone.w;
+        float stopdot = light.params.x;
+
+        if (c2 <= stopdot2)
+            return vec3(0.0);
+
+        add *= c2;
+
+        if (c2 <= stopdot)
+            add *= (c2 - stopdot2) / max(stopdot - stopdot2, 1.0e-6);
+    }
+
+    if (!clearOf(p, l, distance - RAY_EPSILON, shadowMask()))
+        return vec3(0.0);
+
+    return add;
+}
+
+vec3 arghradLight(Light light, vec3 p, vec3 n, inout uint seed)
+{
+    uint type = uint(light.params.y);
+
+    if (type == LIGHT_SUN)
+    {
+        float c = -dot(n, light.directionCone.xyz);
+
+        if (c <= 0.001 || !reachesSky(p, -light.directionCone.xyz, true))
+            return vec3(0.0);
+
+        return light.radiance.rgb * c;
+    }
+
+    if (type == LIGHT_SKYDOME)
+    {
+        // _sun_ambient: added whole wherever any light-giving sky patch is in view, however
+        // low on the horizon - so the directions are uniform over the hemisphere, not cosine
+        // weighted, and a few of them (4 cosine rays gave the walls of ql_sun half of it).
+        for (int k = 0; k < 16; k++)
+        {
+            float z = rand(seed);
+            float r = sqrt(max(1.0 - z * z, 0.0));
+            float phi = 6.2831853 * rand(seed);
+            vec3 t = normalize(abs(n.x) > 0.5 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
+            vec3 b = cross(n, t);
+            vec3 d = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * max(z, 0.001));
+
+            if (reachesSky(p, d, true))
+                return light.radiance.rgb;
+        }
+
+        return vec3(0.0);
+    }
+
+    vec3 delta = light.positionRadius.xyz - p;
+    float d = length(delta);
+    vec3 l = delta / max(d, 1.0e-4);
+    float c = dot(n, l);
+
+    if (c < 0.001)
+        return vec3(0.0);
+
+    float intensity = light.atten.x;
+    uint falloff = uint(light.atten.w + 0.5);
+    float waitDistance = d * light.extra.x;
+
+    if (falloff == 0u && abs(intensity) < waitDistance)
+        return vec3(0.0);
+
+    float angwait = light.extra.y;
+
+    if (angwait != 1.0)
+        c = angwait * c + (1.0 - angwait);
+
+    float scale = falloff == 0u ? (intensity >= 0.0 ? intensity - waitDistance : intensity + waitDistance) * c
+                : falloff == 1u ? intensity / max(d, 1.0e-4) * c
+                : intensity / max(d * d, 1.0e-4) * c;
+
+    if (type == LIGHT_SPOT)
+    {
+        float c2 = -dot(light.directionCone.xyz, l);
+
+        if (c2 <= light.directionCone.w)
+            return vec3(0.0);
+
+        float focus = light.extra.z;
+
+        if (focus != 1.0)
+        {
+            c2 = focus * c2 + (1.0 - focus);
+
+            if (c2 < 0.0)
+                return vec3(0.0);
+        }
+
+        scale *= c2;
+    }
+
+    if (!clearOf(p, l, d - RAY_EPSILON, shadowMask()))
+        return vec3(0.0);
+
+    return light.radiance.rgb * scale;
+}
+
+vec3 vradLight(Light light, vec3 p, vec3 n, inout uint seed)
+{
+    uint type = uint(light.params.y);
+
+    if (type == LIGHT_SUN)
+    {
+        float c = max(0.0, -dot(n, light.directionCone.xyz));
+
+        if (c <= 0.0)
+            return vec3(0.0);
+
+        // SunSpreadAngle: an unnormalised jitter of sin(spread) around the direction to the sun.
+        vec3 toSun = -light.directionCone.xyz;
+
+        if (light.params.z > 0.0)
+        {
+            vec3 j = vec3(rand(seed), rand(seed), rand(seed)) * 2.0 - 1.0;
+            toSun = normalize(toSun + j * light.params.z);
+        }
+
+        return reachesSky(p, toSun, true) ? light.radiance.rgb * c : vec3(0.0);
+    }
+
+    if (type == LIGHT_SKYDOME)
+    {
+        // emit_skyambient: I x the cosine-weighted share of directions that see sky.
+        vec3 d = cosineSample(n, seed);
+        return reachesSky(p, d, false) ? light.radiance.rgb : vec3(0.0);
+    }
+
+    vec3 delta = light.positionRadius.xyz - p;
+    float d = length(delta);
+    vec3 l = delta / max(d, 1.0e-4);
+    float c = max(0.0, dot(n, l));
+
+    if (c <= 0.0)
+        return vec3(0.0);
+
+    float startFade = light.extra.x;
+    float endFade = light.extra.y;
+    bool window = endFade > startFade;
+
+    if (window && d > endFade)
+        return vec3(0.0);
+
+    float de = min(max(d, 1.0), light.extra.z);
+    float fall = 1.0 / max(light.atten.x + light.atten.y * de + light.atten.z * de * de, 1.0e-12);
+
+    if (window)
+    {
+        float t = 1.0 - clamp((d - startFade) / (endFade - startFade), 0.0, 1.0);
+        fall *= t * t * t * (t * (6.0 * t - 15.0) + 10.0);
+    }
+
+    if (type == LIGHT_SPOT)
+    {
+        float c2 = -dot(l, light.directionCone.xyz);
+        float stopdot2 = light.directionCone.w;
+        float stopdot = light.params.x;
+
+        if (c2 <= stopdot2)
+            return vec3(0.0);
+
+        fall *= c2;
+
+        if (c2 <= stopdot)
+        {
+            float m = clamp((c2 - stopdot2) / max(stopdot - stopdot2, 1.0e-6), 0.0, 1.0);
+            float exponent = light.params.w;
+
+            if (exponent != 0.0 && exponent != 1.0)
+                m = pow(m, exponent);
+
+            fall *= m;
+        }
+    }
+
+    if (!clearOf(p, l, d - RAY_EPSILON, shadowMask()))
+        return vec3(0.0);
+
+    return light.radiance.rgb * fall * c;
+}
+
+// ---- texture lights: one emitter point, picked in proportion to power ----
+
+vec3 emitterLight(vec3 p, vec3 n, inout uint seed)
+{
+    uint count = frame.model.y;
+
+    if (count == 0u)
+        return vec3(0.0);
+
+    float total = uintBitsToFloat(frame.model.z);
+    float u = rand(seed) * total;
+
+    uint lo = 0u;
+    uint hi = count - 1u;
+
+    while (lo < hi)
+    {
+        uint mid = (lo + hi) / 2u;
+
+        if (emitters[mid].p1.w < u)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+
+    Emitter e = emitters[lo];
+
+    float r1 = sqrt(rand(seed));
+    float r2 = rand(seed);
+    vec3 y = (1.0 - r1) * e.p0.xyz + r1 * (1.0 - r2) * e.p1.xyz + r1 * r2 * e.p2.xyz;
+
+    vec3 delta = y - p;
+    float d = length(delta);
+    vec3 l = delta / max(d, 1.0e-4);
+    float c1 = dot(n, l);
+    float c2 = -dot(e.normal.xyz, l);
+    vec3 intensity = e.intensity.rgb;
+    float shadowDistance = d;
+    vec3 f;
+
+    uint model = frame.model.x;
+
+    if (model == MODEL_ZHLT)
+    {
+        // emit_surface: intensity x cos x cos2 / (d fade [d]), the global fade and falloff.
+        if (c1 <= 0.001 || c2 <= 0.001)
+            return vec3(0.0);
+
+        float dd = max(d, 1.0);
+        f = intensity * c1 * c2 / (dd * frame.modelD.x * (frame.modelD.y > 1.5 ? dd : 1.0));
+    }
+    else if (model == MODEL_ARGHRAD)
+    {
+        if (c1 < 0.001 || c2 < 0.001)
+            return vec3(0.0);
+
+        // The anti-splotch rewrite near the emitter.
+        float chop = frame.modelC.x;
+
+        if (d < chop)
+        {
+            c1 = (d * c1 + (chop - d)) / chop;
+            c2 = (d * c2 + 2.0 * (chop - d)) / chop;
+            d = chop;
+        }
+
+        f = intensity * c1 * c2 / (d * d);
+    }
+    else
+    {
+        // VRAD: dot2 / d^2 with the raw distance.
+        c1 = max(c1, 0.0);
+        c2 = max(c2, 0.0);
+
+        if (c1 <= 0.0 || c2 <= 0.0)
+            return vec3(0.0);
+
+        f = intensity * c1 * c2 / max(d * d, 1.0e-6);
+    }
+
+    if (!clearOf(p, l, shadowDistance - 0.5, shadowMask()))
+        return vec3(0.0);
+
+    // f / pdf, the pdf being (power / total) / area and power = area x strength.
+    float strength = e.p2.w / max(e.p0.w, 1.0e-12);
+    return f * total / max(strength, 1.0e-12);
+}
+
+// Everything the compiler's direct pass adds at a sample point.
+vec3 gameDirect(vec3 p, vec3 n, inout uint seed)
+{
+    vec3 sum = vec3(0.0);
+    uint lightCount = frame.counts.y;
+
+    if (lightCount > 0u)
+    {
+        uint budget = uint(frame.units.z);
+        uint taken = min(lightCount, budget);
+        float scale = float(lightCount) / float(taken);
+        uint start = lightCount > budget ? uint(rand(seed) * float(lightCount)) : 0u;
+        uint model = frame.model.x;
+
+        for (uint k = 0u; k < taken; k++)
+        {
+            Light light = lights[(start + k) % lightCount];
+
+            if (model == MODEL_ZHLT)
+                sum += zhltLight(light, p, n, seed) * scale;
+            else if (model == MODEL_ARGHRAD)
+                sum += arghradLight(light, p, n, seed) * scale;
+            else
+                sum += vradLight(light, p, n, seed) * scale;
+        }
+    }
+
+    return sum + emitterLight(p, n, seed);
+}
+
+// The compiler's radiosity at a sample point, as a path: each bounce off a surface keeps what
+// the compiler's reflectivity rule says and brings back that surface's own direct light.
+// ArghRad seeds a patch with the mean of its lit luxels - those within the patch's cell of
+// the global chop grid, 16 units of margin, R+G+B >= 3 - each already clamped at maxlight
+// with its hue kept. A lit point drawn from the cell (a few tries) estimates that mean.
+// Measured on ql_spot: the unlit luxels left out of the mean and the clamp both matter
+// (bounce-lit walls 161/140/160 in the BSP; plain mean 153/136/153, unclamped 185/167/185).
+vec3 arghradSeed(vec3 p, vec3 n, MaterialRecord m, int tries, inout uint seed)
+{
+    float chop = 2.0 * m.params.w;
+    float offset = max(m.params.x, RAY_EPSILON);
+
+    if (chop <= 0.0)
+        return gameDirect(p + n * offset, n, seed);
+
+    vec3 cellMin = floor(p / chop) * chop - 16.0;
+
+    // A cell lit over a share f of it is found with 1 - (1 - f)^tries; a miss returns 0, which
+    // pulls the estimate back toward the plain mean - so the first bounce, which carries most
+    // of the light, tries harder.
+    for (int k = 0; k < tries; k++)
+    {
+        vec3 r = cellMin + vec3(rand(seed), rand(seed), rand(seed)) * (chop + 32.0);
+        vec3 q = r - n * dot(r - p, n);
+        vec3 c = gameDirect(q + n * offset, n, seed);
+        float mx = max3(c);
+
+        if (c.r + c.g + c.b >= 3.0)
+            return c * (min(mx, frame.modelA.x) / mx);
+    }
+
+    return vec3(0.0);
+}
+
+vec3 gameBounce(vec3 p, vec3 n, inout uint seed)
+{
+    uint bounces = uint(frame.units.y);
+    vec3 sum = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+    vec3 origin = p;
+    vec3 normal = n;
+    uint model = frame.model.x;
+
+    bool windows = model == MODEL_ARGHRAD && (frame.counts.w & FRAME_SEETHROUGH) != 0u;
+
+    for (uint k = 0u; k < bounces; k++)
+    {
+        vec3 direction = cosineSample(normal, seed);
+
+        // ArghRad makes a patch of every face, windows too, and its TestLine ignores windows:
+        // a patch transfers both to a window and to what lies behind it, then normalises its
+        // transfers to 1, so the window's share of its view is counted twice. One of the two
+        // is taken at twice the weight, and the gather is divided by 1 + that share. The share
+        // takes 16 probes: 1 / (1 + share) of a 4-probe estimate is biased enough to move
+        // ql_trans by 4 levels, and moved with unrelated edits to the shader.
+        if (windows)
+        {
+            const int K = 16;
+            int through = 0;
+
+            for (int r = 0; r < K; r++)
+            {
+                vec3 d = cosineSample(normal, seed);
+
+                if (traceClosest(origin, d, RAY_EPSILON, RAY_FAR, MASK_VISIBLE | MASK_TRANSPARENT | MASK_SKY))
+                {
+                    HitPayload probe = hit;
+
+                    if ((materials[probe.materialIndex].flags & (MATERIAL_TRANSLUCENT | MATERIAL_ALPHATEST | MATERIAL_ADDITIVE)) != 0u
+                        && dot(probe.normal, d) < 0.0)
+                        through++;
+                }
+            }
+
+            throughput /= 1.0 + float(through) / float(K);
+        }
+
+        bool found = traceClosest(origin, direction, RAY_EPSILON, RAY_FAR,
+            MASK_VISIBLE | MASK_SKY | (windows ? MASK_TRANSPARENT : 0u));
+        bool window = false;
+
+        if (windows && found)
+        {
+            HitPayload first = hit;
+            window = (materials[first.materialIndex].flags & (MATERIAL_TRANSLUCENT | MATERIAL_ALPHATEST | MATERIAL_ADDITIVE)) != 0u
+                && dot(first.normal, direction) < 0.0;
+        }
+
+        if (window)
+        {
+            throughput *= 2.0;
+
+            if (rand(seed) < 0.5)
+                found = traceClosest(origin, direction, RAY_EPSILON, RAY_FAR, MASK_VISIBLE | MASK_SKY);
+        }
+
+        if (!found)
+            break;
+
+        MaterialRecord m = materials[hit.materialIndex];
+
+        // Sky patches take light and give none back; the back of a face has no light.
+        if ((m.flags & MATERIAL_SKY) != 0u || dot(hit.normal, direction) > 0.0)
+            break;
+
+        // ZHLT 3.4 has no texture reflectivity: every transfer keeps half, in grey.
+        vec3 reflectivity = model == MODEL_ZHLT ? vec3(frame.modelD.w) : m.reflectivity.rgb;
+        throughput *= reflectivity;
+
+        vec3 y = hit.position + hit.normal * max(m.params.x, RAY_EPSILON);
+        vec3 ny = hit.normal;
+        vec3 light = model == MODEL_ARGHRAD ? arghradSeed(hit.position, ny, m, k == 0u ? 16 : 6, seed) : gameDirect(y, ny, seed);
+
+        // ZHLT normalises each patch's transfers so that it sends exactly its share to the
+        // patches it sees (vismatrixutil.cpp, total = 0.5 / sum): what a physical patch loses to
+        // the sky, a ZHLT patch gives to the rest. 1 / (share of its view that is patches), by
+        // (K+1)/(hits+1), which estimates 1/p without the blow-up of hits/K.
+        if (model == MODEL_ZHLT)
+        {
+            const int K = 6;
+            int seen = 0;
+
+            for (int r = 0; r < K; r++)
+            {
+                vec3 d = cosineSample(ny, seed);
+
+                if (traceClosest(y, d, RAY_EPSILON, RAY_FAR, MASK_VISIBLE | MASK_SKY))
+                {
+                    HitPayload probe = hit;
+
+                    if ((materials[probe.materialIndex].flags & MATERIAL_SKY) == 0u)
+                        seen++;
+                }
+            }
+
+            light *= float(K + 1) / float(seen + 1);
+        }
+
+        // A light face's own baselight is not in its patches' bounce seed: measured on
+        // ql_texlight (floor 65 = 40 direct + 25 bounce; seeding it gave 110).
+
+        sum += throughput * light;
+
+        if (max3(throughput) < 0.002)
+            break;
+
+        origin = y;
+        normal = ny;
+    }
+
+    return sum;
+}
+
+// hw.dll BuildGammaTable's lightgammatable entry i (0..1023).
+float lightGamma(float i)
+{
+    float f = pow(i / 1023.0, frame.modelB.w);
+    float brightness = frame.modelC.x;
+    float g3 = frame.modelB.z;
+
+    if (brightness > 1.0)
+        f *= brightness;
+
+    f = f <= g3 ? f / g3 * 0.125 : (f - g3) / (1.0 - g3) * 0.875 + 0.125;
+    return clamp(floor(pow(f, frame.modelB.y) * 1023.0), 0.0, 1023.0);
+}
+
+// The compiler's sum for a luxel before its output transform: what the lightmap holds in
+// linear terms. This is what a pixel accumulates - the transform (gamma, clamps) is not
+// linear, so it must see the converged value, not each noisy sample - and gameDisplayOf
+// turns it into the factor the texture is multiplied by on screen.
+vec3 gameLightValue(vec3 direct, vec3 bounce, MaterialRecord m)
+{
+    uint model = frame.model.x;
+
+    // ZHLT FinalLightFace: (direct + own texlight) x dscale + bounce.
+    if (model == MODEL_ZHLT)
+        return max((direct + m.emission.rgb) * frame.modelA.x + bounce, vec3(0.0));
+
+    // ArghRad FinalLightFace: direct + bounce + ambient (+ a light face's own light), x -scale.
+    if (model == MODEL_ARGHRAD)
+        return max((direct + bounce + frame.modelB.xyz + m.emission.rgb) * frame.modelA.y, vec3(0.0));
+
+    // VRAD: direct + bounce, vrad units.
+    return max(direct + bounce, vec3(0.0));
+}
+
+// The compiler's output transform into the lightmap byte, then the engine's decode. The same
+// function is in denoise.comp, where the compose pass applies it; keep the two alike.
+vec3 gameDisplayOf(vec3 lb)
+{
+    uint model = frame.model.x;
+
+    if (model == MODEL_ZHLT)
+    {
+        // Hue-kept clamp at maxlight, gamma, truncate. R_BuildLightMap: byte x style x S >> 14
+        // into the light gamma table, >> 2, and the draw's overbright K.
+        float mx = max3(lb);
+
+        if (mx > frame.modelA.z)
+            lb *= frame.modelA.z / mx;
+
+        vec3 byte = min(floor(pow(lb / 256.0, vec3(frame.modelA.y)) * 256.0), vec3(255.0));
+        vec3 index = min(floor(byte * frame.modelC.w * frame.modelC.y / 16384.0), vec3(1023.0));
+        vec3 texel = floor(vec3(lightGamma(index.x), lightGamma(index.y), lightGamma(index.z)) / 4.0);
+
+        return texel / 255.0 * frame.modelC.z;
+    }
+
+    if (model == MODEL_ARGHRAD)
+    {
+        // Floor 1, hue-kept clamp at maxlight, truncate. KEX shows 2 x texture x byte / 255.
+        lb = max(lb, vec3(1.0));
+
+        float mx = max3(lb);
+        float newMax = min(mx, frame.modelA.x);
+        vec3 byte = floor(lb / mx * newMax);
+
+        return min(byte / 255.0, vec3(1.0)) * frame.modelA.z;
+    }
+
+    // VRAD: L = vrad / 255, multiplied in linear space.
+    return lb * frame.modelA.x;
+}
+
+// Where on the face the compiler took the sample this camera sample stands for: one of the
+// four luxels around the point, picked with its bilinear weight, then the compiler's own
+// place for that luxel's sample(s).
+vec3 luxelSample(MaterialRecord m, vec3 p, vec3 n, inout uint seed)
+{
+    if ((m.flags & MATERIAL_LIGHTMAPPED) == 0u)
+        return p;
+
+    vec3 sAxis = m.lightmapS.xyz;
+    vec3 tAxis = m.lightmapT.xyz;
+    float s = dot(p, sAxis) + m.lightmapS.w;
+    float t = dot(p, tAxis) + m.lightmapT.w;
+
+    float ls = floor(s) + (rand(seed) < fract(s) ? 1.0 : 0.0);
+    float lt = floor(t) + (rand(seed) < fract(t) ? 1.0 : 0.0);
+
+    vec2 offset = vec2(0.0);
+    uint model = frame.model.x;
+    bool extra = (frame.model.w & MODELFLAG_EXTRA) != 0u;
+
+    if (model == MODEL_VRAD)
+    {
+        // A luxel is the mean of the four half-offset sample cells around its point.
+        offset = vec2(rand(seed) < 0.5 ? -0.5 : 0.5, rand(seed) < 0.5 ? -0.5 : 0.5);
+    }
+    else if (model == MODEL_ZHLT && extra)
+    {
+        // -extra: 9 sub-samples a third of the way to each neighbour, weighted 5 9 5 / 9 16 9.
+        float u = rand(seed) * 100.0;
+        int ix = 0, iy = 0;
+        float acc = 0.0;
+        const float w[9] = float[9](5.0, 9.0, 5.0, 9.0, 16.0, 9.0, 5.0, 9.0, 5.0);
+
+        for (int k = 0; k < 9; k++)
+        {
+            acc += w[k];
+
+            if (u < acc || k == 8)
+            {
+                ix = k % 3 - 1;
+                iy = k / 3 - 1;
+                break;
+            }
+        }
+
+        offset = vec2(float(ix), float(iy)) / 3.0;
+    }
+    else if (model == MODEL_ARGHRAD && extra)
+    {
+        // -extra: (0,0) and the four quarter-luxel diagonals, weighted equally.
+        int k = min(int(rand(seed) * 5.0), 4);
+        const vec2 o[5] = vec2[5](vec2(0.0), vec2(-0.25, -0.25), vec2(0.25, -0.25), vec2(0.25, 0.25), vec2(-0.25, 0.25));
+        offset = o[k];
+    }
+
+    // The point of the plane at (ls, lt) + offset in luxel space.
+    mat3 toLuxel = transpose(mat3(sAxis, tAxis, n));
+    vec3 delta = inverse(toLuxel) * vec3(ls + offset.x - s, lt + offset.y - t, 0.0);
+    float len = length(delta);
+
+    if (len < 1.0e-3)
+        return p;
+
+    // A luxel centre past the edge of the face, inside the wall that meets it, is pulled back to
+    // the face as the compilers nudge theirs.
+    vec3 direction = delta / len;
+    vec3 lifted = p + n * 0.25;
+
+    if (traceClosest(lifted, direction, 0.0, len, MASK_OCCLUDER))
+        return p + direction * max(hit.t - 0.25, 0.0);
+
+    return p + delta;
+}
+
+// The compilers gather bounce light on patches (about 64 units; ArghRad on a global grid,
+// ZHLT and VRAD along the texture axes) and interpolate the patch centres onto the luxels, so
+// their bounce light never reaches into a corner: the nearest patch centre is half a patch
+// away from the wall. The bounce is gathered at such a point - pushed off any wall that is
+// closer than half a patch along the face - instead of at the luxel itself.
+vec3 patchPoint(MaterialRecord m, vec3 p, vec3 n)
+{
+    float halfPatch = m.params.w;
+
+    if (halfPatch <= 0.0 || (m.flags & MATERIAL_LIGHTMAPPED) == 0u)
+        return p;
+
+    vec3 s = m.lightmapS.xyz - n * dot(m.lightmapS.xyz, n);
+    vec3 t = m.lightmapT.xyz - n * dot(m.lightmapT.xyz, n);
+
+    if (dot(s, s) < 1.0e-12 || dot(t, t) < 1.0e-12)
+        return p;
+
+    s = normalize(s);
+    t = normalize(t);
+
+    vec3 q = p;
+    vec3 axes[4] = vec3[4](s, -s, t, -t);
+
+    for (int k = 0; k < 4; k++)
+    {
+        if (traceClosest(q, axes[k], 0.0, halfPatch, MASK_OCCLUDER))
+            q -= axes[k] * (halfPatch - hit.t);
+    }
+
+    return q;
+}
+
+vec3 gameLightmap(MaterialRecord m, vec3 p, vec3 n, inout uint seed)
+{
+    vec3 q = luxelSample(m, p, n, seed);
+    vec3 samplePoint = q + n * m.params.x;
+
+    vec3 direct = gameDirect(samplePoint, n, seed);
+    vec3 bounce = frame.units.y > 0.5 ? gameBounce(patchPoint(m, samplePoint, n), n, seed) : vec3(0.0);
+
+    return gameLightValue(direct, bounce, m);
+}
+
+// The texel, as the engine samples it: raw bytes (no sRGB decode), unfiltered when the game
+// draws with GL_NEAREST.
+vec4 gameTexel(MaterialRecord m, vec2 uv, float footprint, float uvDensity)
+{
+    if (m.albedoTexture < 0)
+        return vec4(1.0);
+
+    if ((frame.model.w & MODELFLAG_NEAREST) != 0u)
+    {
+        vec2 size = vec2(textureSize(textures[nonuniformEXT(m.albedoTexture)], 0));
+        vec2 snapped = (floor(fract(uv) * size) + 0.5) / size;
+        return textureLod(textures[nonuniformEXT(m.albedoTexture)], snapped, 0.0);
+    }
+
+    vec2 size = vec2(textureSize(textures[nonuniformEXT(m.albedoTexture)], 0));
+    float texels = footprint * uvDensity * sqrt(size.x * size.y);
+    float lod = log2(max(texels, 1.0e-4));
+    return textureLod(textures[nonuniformEXT(m.albedoTexture)], uv, lod);
+}
+
+// The engine's texture term T.
+vec3 gameAlbedo(vec3 texel, MaterialRecord m)
+{
+    uint model = frame.model.x;
+
+    // hw.dll uploads every palette colour through texgammatable.
+    if (model == MODEL_ZHLT)
+        texel = floor(pow(texel, vec3(frame.modelB.x)) * 255.0 + 1.0e-3) / 255.0;
+
+    // Source decodes the base texture from sRGB and lights it in linear space.
+    if (model == MODEL_VRAD)
+        texel = srgbToLinear(texel);
+
+    return texel * m.color.rgb;
+}
+
+// What the camera sees of the sky, in the compose pass's space. The cube holds linear light
+// (the host decoded the faces from sRGB); Source draws it so (x the exposure, later), the
+// 8-bit engines draw the face's bytes as they are.
+vec3 gameSky(vec3 direction)
+{
+    vec3 c = skyRadiance(direction);
+
+    if (frame.model.x != MODEL_VRAD && frame.skyScale.x > 0.0)
+        c = linearToSrgbColor(clamp(c, 0.0, 1.0));
+
+    // hw.dll uploads the sky faces through texgammatable like every other texture (measured:
+    // palette 127 shows as 146, 177 as 191 at gamma 2.5).
+    if (frame.model.x == MODEL_ZHLT)
+        c = floor(pow(c, vec3(frame.modelB.x)) * 255.0 + 1.0e-3) / 255.0;
+
+    return c;
+}
+
+// One camera sample in a game model: through see-through layers to the first opaque surface.
+void traceGame(vec3 origin, vec3 direction, float pixelSpread, inout uint seed, inout vec3 direct, inout vec3 indirect,
+    inout vec3 albedoSum, inout float hits, inout Surface surface, bool describe)
+{
+    float transmit = 1.0;
+    float travelled = 0.0;
+    float tmin = 0.0;
+
+    for (int layer = 0; layer < 8; layer++)
+    {
+        // MASK_EDITOR: tool brushes and other editor-only surfaces are seen by the camera
+        // here and by nothing else, so they never change the lighting they sit in.
+        bool found = traceClosest(origin, direction, tmin, RAY_FAR, MASK_VISIBLE | MASK_TRANSPARENT | MASK_SKY | MASK_EDITOR);
+        MaterialRecord m;
+        bool sky = !found;
+
+        if (found)
+        {
+            m = materials[hit.materialIndex];
+            sky = (m.flags & MATERIAL_SKY) != 0u;
+        }
+
+        if (sky)
+        {
+            direct += transmit * gameSky(direction);
+            return;
+        }
+
+        travelled += hit.t;
+
+        // The engines cull back faces: from behind, a face is not there. A face that a back
+        // face lies on (a brush's bottom on the floor) is found by a short culled probe from
+        // just before the plane - stepping past the back face would step past it too.
+        if (dot(hit.normal, direction) > 0.0)
+        {
+            vec3 behind = hit.position;
+
+            if (!coplanarFront(behind, direction) || dot(hit.normal, direction) > 0.0)
+            {
+                origin = behind;
+                tmin = RAY_EPSILON;
+                continue;
+            }
+
+            m = materials[hit.materialIndex];
+
+            if ((m.flags & MATERIAL_SKY) != 0u)
+            {
+                direct += transmit * gameSky(direction);
+                return;
+            }
+
+            hit.t = 0.0;
+        }
+
+        vec3 n = hit.normal;
+
+        float footprint = travelled * pixelSpread / max(abs(dot(n, direction)), 0.25);
+        vec4 texel = gameTexel(m, hit.uv, footprint, hit.uvDensity);
+
+        if ((m.flags & MATERIAL_ALPHATEST) != 0u && texel.a < m.params.y)
+        {
+            origin = hit.position;
+            tmin = RAY_EPSILON;
+            continue;
+        }
+
+        if ((m.flags & MATERIAL_HOLEBLACK) != 0u && texel.a < 0.5)
+            texel.rgb = vec3(0.0);
+
+        vec3 albedo = gameAlbedo(texel.rgb, m);
+        vec3 position = hit.position;
+        bool unlit = (m.flags & MATERIAL_UNLIT) != 0u;
+        bool seeThrough = (m.flags & (MATERIAL_ADDITIVE | MATERIAL_TRANSLUCENT)) != 0u;
+
+        // A see-through layer is final here, transformed per sample; the opaque surface keeps
+        // its linear light value for the compose pass to transform once converged.
+        vec3 lb = unlit ? vec3(0.0) : gameLightmap(m, position, n, seed);
+        vec3 G = unlit ? vec3(m.params.z) : (seeThrough ? gameDisplayOf(lb) : vec3(0.0));
+
+        if ((m.flags & MATERIAL_ADDITIVE) != 0u)
+        {
+            direct += transmit * albedo * G * m.color.a * texel.a;
+            origin = position;
+            tmin = RAY_EPSILON;
+            continue;
+        }
+
+        if ((m.flags & MATERIAL_TRANSLUCENT) != 0u)
+        {
+            float alpha = clamp(m.color.a * texel.a, 0.0, 1.0);
+            direct += transmit * alpha * albedo * G;
+            transmit *= 1.0 - alpha;
+
+            if (transmit < 0.002)
+                return;
+
+            origin = position;
+            tmin = RAY_EPSILON;
+            continue;
+        }
+
+        if (unlit)
+        {
+            // Unlit and opaque: nothing for the compose pass to transform.
+            direct += transmit * albedo * G;
+        }
+        else
+        {
+            albedoSum += transmit * albedo;
+            hits += 1.0;
+            indirect += lb;
+        }
+
+        if (describe)
+        {
+            surface.hit = true;
+            surface.position = position + n * RAY_EPSILON;
+            surface.normal = n;
+            surface.albedo = albedo;
+            surface.depth = travelled;
+        }
+
+        return;
     }
 }
 
@@ -441,16 +1449,25 @@ void main()
         near /= near.w;
         far /= far.w;
 
-        tracePath(near.xyz, normalize(far.xyz - near.xyz), pixelSpread, seed, direct, indirect, albedoSum, hits, surface, s == 0u);
+        if (frame.model.x == MODEL_PHYSICAL)
+            tracePath(near.xyz, normalize(far.xyz - near.xyz), pixelSpread, seed, direct, indirect, albedoSum, hits, surface, s == 0u);
+        else
+            traceGame(near.xyz, normalize(far.xyz - near.xyz), pixelSpread, seed, direct, indirect, albedoSum, hits, surface, s == 0u);
     }
 
-    direct /= float(spp);
-    indirect /= float(spp);
+    bool game = frame.model.x != MODEL_PHYSICAL;
 
-    // The albedo the indirect light is put back under: the mean over the samples that hit
-    // something, so a pixel half on the sky keeps the surface's albedo and the coverage
-    // lives in the indirect term alone.
-    vec3 albedo = hits > 0.0 ? albedoSum / hits : vec3(0.0);
+    // How much each half of this frame's estimate weighs in the history. For the physical
+    // model the albedo is the mean over the samples that hit something, so a pixel half on the
+    // sky keeps the surface's albedo and the coverage lives in the indirect term. A game model
+    // swaps them: its indirect term is the light value the compose pass transforms, which must
+    // be the mean over lit hits alone, so the coverage rides on the albedo instead.
+    float indirectWeight = game ? hits : float(spp);
+    float albedoWeight = game ? float(spp) : hits;
+
+    direct /= float(spp);
+    indirect = indirectWeight > 0.0 ? indirect / (game ? hits : float(spp)) : vec3(0.0);
+    vec3 albedo = game ? albedoSum / float(spp) : (hits > 0.0 ? albedoSum / hits : vec3(0.0));
 
     // Guard the average against a stray infinity from a degenerate ray.
     if (any(isnan(direct)) || any(isinf(direct)))
@@ -492,15 +1509,17 @@ void main()
     float weight = float(spp);
 
     direct = (directHistory * directCount + direct * weight) / (directCount + weight);
-    indirect = (indirectHistory * indirectCount + indirect * weight) / (indirectCount + weight);
 
-    if (albedoCount + hits > 0.0)
-        albedo = (albedoHistory * albedoCount + albedo * hits) / (albedoCount + hits);
+    if (indirectCount + indirectWeight > 0.0)
+        indirect = (indirectHistory * indirectCount + indirect * indirectWeight) / (indirectCount + indirectWeight);
 
-    // Counts live in a 16-bit float: exact to 2048, and nothing past that matters.
-    directCount = min(directCount + weight, 2048.0);
-    indirectCount = min(indirectCount + weight, 2048.0);
-    albedoCount = min(albedoCount + hits, 2048.0);
+    if (albedoCount + albedoWeight > 0.0)
+        albedo = (albedoHistory * albedoCount + albedo * albedoWeight) / (albedoCount + albedoWeight);
+
+    // 32-bit histories: a still picture keeps converging; the cap only bounds the count.
+    directCount = min(directCount + weight, 1048576.0);
+    indirectCount = min(indirectCount + indirectWeight, 1048576.0);
+    albedoCount = min(albedoCount + albedoWeight, 1048576.0);
 
     imageStore(positions[parity], pixel, vec4(surface.position, surface.hit ? 1.0 : 0.0));
     imageStore(normals[parity], pixel, vec4(surface.normal, surface.depth));

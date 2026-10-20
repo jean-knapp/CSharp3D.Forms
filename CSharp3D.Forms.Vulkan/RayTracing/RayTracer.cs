@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -32,7 +32,15 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         private const int MaxTextures = 4096;
 
         /// <summary>Samples a pixel needs of its own before the smoothing leaves it alone entirely.</summary>
-        private const float HistoryFull = 1024f;
+        private const float PhysicalHistoryFull = 1024f;
+
+        /// <summary>
+        /// Samples at which a pixel stops borrowing from its neighbours. A game model's light
+        /// value is the lightmap's - mostly deterministic direct light, noise only in the bounce -
+        /// and smoothing it flattens real features (the bright spot under a light came out 10%
+        /// dim at 512 samples), so it trusts itself much sooner.
+        /// </summary>
+        private float HistoryFull => _lightModel.IsGameModel ? 96f : PhysicalHistoryFull;
 
         /// <summary>How much history a pixel keeps through a camera move. Short enough to follow the picture.</summary>
         private const float MovingHistoryIndirect = 24f;
@@ -69,6 +77,12 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         private Pipeline _denoisePipeline;
         private Pipeline _luminancePipeline;
         private Pipeline _tonemapPipeline;
+        private DescriptorSetLayout _bloomSetLayout;
+        private PipelineLayout _bloomPipelineLayout;
+        private Pipeline _bloomPipeline;
+        private DescriptorSet _bloomSet;
+        private Image _bloomA;
+        private Image _bloomB;
         private readonly List<ShaderModule> _modules = new List<ShaderModule>();
 
         private Buffer _sbt;
@@ -103,6 +117,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         // ---- per frame ----
         private Buffer _frameBuffer;
         private Buffer _exposureBuffer;
+        private CommandPool _commandPool;
         private CommandBuffer _cmd;
         private Semaphore _acquired;
         private Semaphore _rendered;
@@ -119,6 +134,48 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
         /// <summary>Diffuse bounces after the first hit. One is what Lumen's final gather amounts to.</summary>
         public int Bounces { get; set; } = 1;
+
+        /// <summary>
+        /// The light model frames are shaded with: the default physical one, or a game's
+        /// compiler and engine (GpuLightModel). Changing it restarts the picture.
+        /// </summary>
+        public GpuLightModel LightModel
+        {
+            get { return _lightModel; }
+            set
+            {
+                if (_lightModel.Model == value.Model && _lightModel.Flags == value.Flags && _lightModel.A == value.A
+                    && _lightModel.B == value.B && _lightModel.C == value.C && _lightModel.D == value.D)
+                    return;
+
+                _lightModel = value;
+                Restart();
+            }
+        }
+
+        private GpuLightModel _lightModel = GpuLightModel.Default;
+
+        /// <summary>How the composed picture becomes screen bytes.</summary>
+        public TonemapMode Tonemap { get; set; } = TonemapMode.Filmic;
+
+        /// <summary>
+        /// The game's exposure for <see cref="TonemapMode.LinearExposure"/>; 0 lets the exposure
+        /// pass adapt it.
+        /// </summary>
+        public float TonemapScale { get; set; }
+
+        /// <summary>
+        /// Adapt the exposure the way Source 2013 does (luminance.comp sourceExposure) instead of
+        /// Unreal's; the result is the scale <see cref="TonemapMode.LinearExposure"/> applies
+        /// when <see cref="TonemapScale"/> is 0.
+        /// </summary>
+        public bool SourceAutoExposure { get; set; }
+
+        /// <summary>Source's mat_autoexposure_min / max.</summary>
+        public Vector2 SourceExposureRange { get; set; } = new Vector2(0.5f, 2f);
+
+        /// <summary>Source's bloom (bloom.comp) at this mat_bloomscale; 0 for none.</summary>
+        public float BloomScale { get; set; }
 
         /// <summary>Lights sampled per hit per frame; a random subset when the map has more.</summary>
         public int LightsPerSample { get; set; } = 8;
@@ -190,7 +247,8 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 Binding(7, DescriptorType.StorageImage, 2, rg),
                 Binding(8, DescriptorType.StorageImage, 2, rg),
                 Binding(9, DescriptorType.StorageImage, 2, rg),
-                Binding(10, DescriptorType.CombinedImageSampler, MaxTextures, rg),
+                Binding(10, DescriptorType.StorageBuffer, 1, rg),
+                Binding(11, DescriptorType.CombinedImageSampler, MaxTextures, rg),
             };
 
             DescriptorBindingFlags[] flags = new DescriptorBindingFlags[rt.Length];
@@ -282,7 +340,13 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             _rtPipelineLayout = PipelineLayoutFor(_rtSetLayout, 0);
             _denoisePipelineLayout = PipelineLayoutFor(_denoiseSetLayout, (uint)sizeof(DenoisePush));
             _luminancePipelineLayout = PipelineLayoutFor(_luminanceSetLayout, (uint)sizeof(ExposurePush));
-            _tonemapPipelineLayout = PipelineLayoutFor(_tonemapSetLayout, 0);
+            _tonemapPipelineLayout = PipelineLayoutFor(_tonemapSetLayout, (uint)sizeof(TonemapPush));
+
+            _bloomSetLayout = SimpleLayout(
+                Binding(0, DescriptorType.StorageImage, 1, cs),
+                Binding(1, DescriptorType.StorageImage, 1, cs),
+                Binding(2, DescriptorType.StorageImage, 1, cs));
+            _bloomPipelineLayout = PipelineLayoutFor(_bloomSetLayout, (uint)sizeof(BloomPush));
         }
 
         private static DescriptorSetLayoutBinding Binding(uint index, DescriptorType type, uint count, ShaderStageFlags stages)
@@ -438,6 +502,10 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 _tonemapPipeline = ComputePipeline(
                     Stage(compiler, "tonemap.comp", ShaderCompiler.Kind.Compute, ShaderStageFlags.ComputeBit, entry),
                     _tonemapPipelineLayout);
+
+                _bloomPipeline = ComputePipeline(
+                    Stage(compiler, "bloom.comp", ShaderCompiler.Kind.Compute, ShaderStageFlags.ComputeBit, entry),
+                    _bloomPipelineLayout);
             }
             finally
             {
@@ -722,9 +790,9 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             DescriptorPoolSize[] sizes =
             {
                 new DescriptorPoolSize(DescriptorType.AccelerationStructureKhr, 1),
-                new DescriptorPoolSize(DescriptorType.StorageImage, 40),
+                new DescriptorPoolSize(DescriptorType.StorageImage, 44),
                 new DescriptorPoolSize(DescriptorType.UniformBuffer, 1),
-                new DescriptorPoolSize(DescriptorType.StorageBuffer, 6),
+                new DescriptorPoolSize(DescriptorType.StorageBuffer, 8),
                 new DescriptorPoolSize(DescriptorType.CombinedImageSampler, 2 * MaxTextures),
             };
 
@@ -733,7 +801,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 DescriptorPoolCreateInfo info = new DescriptorPoolCreateInfo
                 {
                     SType = StructureType.DescriptorPoolCreateInfo,
-                    MaxSets = 5,
+                    MaxSets = 6,
                     PoolSizeCount = (uint)sizes.Length,
                     PPoolSizes = p,
                     Flags = DescriptorPoolCreateFlags.UpdateAfterBindBit,
@@ -758,6 +826,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             _denoiseSet = Allocate(_denoiseSetLayout, null);
             _luminanceSet = Allocate(_luminanceSetLayout, null);
             _tonemapSet = Allocate(_tonemapSetLayout, null);
+            _bloomSet = Allocate(_bloomSetLayout, null);
         }
 
         private DescriptorSet Allocate(DescriptorSetLayout layout, void* next)
@@ -821,6 +890,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 writes.Add(ImageWrite(pinned, _rtSet, 7, _direct));
                 writes.Add(ImageWrite(pinned, _rtSet, 8, _indirect));
                 writes.Add(ImageWrite(pinned, _rtSet, 9, _albedo));
+                writes.Add(BufferWrite(pinned, _rtSet, 10, _scene.EmitterBuffer, DescriptorType.StorageBuffer));
 
                 int textureCount = _scene.Textures.Count;
 
@@ -842,7 +912,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                     {
                         SType = StructureType.WriteDescriptorSet,
                         DstSet = _rtSet,
-                        DstBinding = 10,
+                        DstBinding = 11,
                         DescriptorCount = (uint)textureCount,
                         DescriptorType = DescriptorType.CombinedImageSampler,
                         PImageInfo = images,
@@ -898,6 +968,10 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 writes.Add(ImageWrite(pinned, _tonemapSet, 0, _hdr));
                 writes.Add(ImageWrite(pinned, _tonemapSet, 1, _ldr));
                 writes.Add(BufferWrite(pinned, _tonemapSet, 2, _exposureBuffer, DescriptorType.StorageBuffer));
+
+                writes.Add(ImageWrite(pinned, _bloomSet, 0, _ldr));
+                writes.Add(ImageWrite(pinned, _bloomSet, 1, _bloomA));
+                writes.Add(ImageWrite(pinned, _bloomSet, 2, _bloomB));
 
                 WriteDescriptorSet[] array = writes.ToArray();
 
@@ -973,10 +1047,15 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
             _exposureBuffer.Write(new[] { new ExposureState { AdaptedLogLuminance = 0f, Exposure = 1f } });
 
+            // This tracer records every frame from its own render thread, so it needs a pool
+            // of its own: a second tracer sharing one would be recording into it at the same
+            // time, which Vulkan does not allow and a driver answers with an access violation.
+            _commandPool = _device.CreateCommandPool();
+
             CommandBufferAllocateInfo allocate = new CommandBufferAllocateInfo
             {
                 SType = StructureType.CommandBufferAllocateInfo,
-                CommandPool = _device.CommandPool,
+                CommandPool = _commandPool,
                 Level = CommandBufferLevel.Primary,
                 CommandBufferCount = 1,
             };
@@ -1019,16 +1098,21 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             {
                 _position[i] = _device.CreateImage(width, height, Format.R32G32B32A32Sfloat, storage);
                 _normal[i] = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
-                _direct[i] = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
-                _indirect[i] = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
-                _albedo[i] = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
+                // The histories are running means over thousands of samples: in 16-bit floats a
+                // sample's share of a light value near 170 (the 8-bit engines' scale) is below
+                // half an ulp, so the mean stuck - ql_sun's floor lost 15% of its light.
+                _direct[i] = _device.CreateImage(width, height, Format.R32G32B32A32Sfloat, storage);
+                _indirect[i] = _device.CreateImage(width, height, Format.R32G32B32A32Sfloat, storage);
+                _albedo[i] = _device.CreateImage(width, height, Format.R32G32B32A32Sfloat, storage);
             }
 
-            _pingA = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
-            _pingB = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat, storage);
+            _pingA = _device.CreateImage(width, height, Format.R32G32B32A32Sfloat, storage);
+            _pingB = _device.CreateImage(width, height, Format.R32G32B32A32Sfloat, storage);
             _hdr = _device.CreateImage(width, height, Format.R32G32B32A32Sfloat, storage);
             _ldr = _device.CreateImage(width, height, Format.R8G8B8A8Unorm,
                 ImageUsageFlags.StorageBit | ImageUsageFlags.TransferSrcBit | ImageUsageFlags.ColorAttachmentBit);
+            _bloomA = _device.CreateImage(Math.Max(1u, (width + 3) / 4), Math.Max(1u, (height + 3) / 4), Format.R16G16B16A16Sfloat, storage);
+            _bloomB = _device.CreateImage(Math.Max(1u, (width + 3) / 4), Math.Max(1u, (height + 3) / 4), Format.R16G16B16A16Sfloat, storage);
 
             ImageView attachment = _ldr.View;
 
@@ -1073,6 +1157,8 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             if (_pingB != null) yield return _pingB;
             if (_hdr != null) yield return _hdr;
             if (_ldr != null) yield return _ldr;
+            if (_bloomA != null) yield return _bloomA;
+            if (_bloomB != null) yield return _bloomB;
         }
 
         private void DisposeImages()
@@ -1089,7 +1175,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             for (int i = 0; i < 2; i++)
                 _position[i] = _normal[i] = _direct[i] = _indirect[i] = _albedo[i] = null;
 
-            _pingA = _pingB = _hdr = _ldr = null;
+            _pingA = _pingB = _hdr = _ldr = _bloomA = _bloomB = null;
         }
 
         /// <summary>
@@ -1114,8 +1200,12 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         }
 
         /// <summary>Start the picture over on the next frame: something in the scene changed, so no pixel's history holds.</summary>
+        /// <summary>How many times the picture has started over (diagnostics).</summary>
+        public int RestartCount { get; private set; }
+
         public void Restart()
         {
+            RestartCount++;
             Samples = 0;
             _resetPending = true;
             _exposureReset = true;
@@ -1172,13 +1262,28 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 FrameIndex = _frameIndex,
                 LightCount = (uint)_scene.LightCount,
                 Samples = Samples,
-                Flags = _resetPending ? FrameData.FlagReset : 0u,
+                Flags = (_resetPending ? FrameData.FlagReset : 0u) | (_scene.HasSeeThrough ? FrameData.FlagSeeThrough : 0u),
                 Units = new Vector4(UnitsPerMetre, Bounces, Math.Max(1, LightsPerSample), spp),
                 // z says the camera is still: every pixel keeps its history then, whatever
                 // its jittered sample hit, which is what antialiases the edges.
                 History = moved
                     ? new Vector4(MovingHistoryIndirect, MovingHistoryDirect, 0f, 0f)
                     : new Vector4(65536f, 65536f, 1f, 0f),
+                CubeFromWorld = _scene.CubeFromWorld,
+                SkyA = new Int4(_scene.SkyFaceIndex(0), _scene.SkyFaceIndex(1), _scene.SkyFaceIndex(2), _scene.SkyFaceIndex(3)),
+                SkyB = new Int4(_scene.SkyFaceIndex(4), _scene.SkyFaceIndex(5), (int)_scene.SkyHalfMask, 0),
+                SkyScale = new Vector4(_scene.SkyScale, 0f, 0f, 0f),
+                Model = new UInt4
+                {
+                    X = LightModel.Model,
+                    Y = (uint)_scene.EmitterCount,
+                    Z = BitConverter.ToUInt32(BitConverter.GetBytes(_scene.EmitterPower), 0),
+                    W = LightModel.Flags,
+                },
+                ModelA = LightModel.A,
+                ModelB = LightModel.B,
+                ModelC = LightModel.C,
+                ModelD = LightModel.D,
             };
 
             _frameBuffer.Write(new[] { frame });
@@ -1419,6 +1524,12 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                         Mode = DenoisePush.ModeCompose,
                         Step = 1,
                         HistoryFull = HistoryFull,
+                        Model = LightModel.Model,
+                        ModelFlags = LightModel.Flags,
+                        ModelA = LightModel.A,
+                        ModelB = LightModel.B,
+                        ModelC = LightModel.C,
+                        ModelD = LightModel.D,
                     };
 
                     vk.CmdPushConstants(_cmd, _denoisePipelineLayout, ShaderStageFlags.ComputeBit, 0, (uint)sizeof(DenoisePush), &compose);
@@ -1453,6 +1564,9 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                     Reset = _exposureReset ? 1u : 0u,
                     FixedExposure = AutoExposure ? 0u : 1u,
                     FixedEV100 = FixedEV100,
+                    SourceAuto = SourceAutoExposure ? 1u : 0u,
+                    MinScale = SourceExposureRange.X,
+                    MaxScale = SourceExposureRange.Y,
                 };
 
                 vk.CmdPushConstants(_cmd, _luminancePipelineLayout, ShaderStageFlags.ComputeBit, 0, (uint)sizeof(ExposurePush), &push);
@@ -1467,10 +1581,50 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 DescriptorSet set = _tonemapSet;
                 vk.CmdBindPipeline(_cmd, PipelineBindPoint.Compute, _tonemapPipeline);
                 vk.CmdBindDescriptorSets(_cmd, PipelineBindPoint.Compute, _tonemapPipelineLayout, 0, 1, &set, 0, null);
+
+                TonemapPush tonemap = new TonemapPush
+                {
+                    Mode = (uint)Tonemap,
+                    FixedScale = TonemapScale,
+                };
+
+                vk.CmdPushConstants(_cmd, _tonemapPipelineLayout, ShaderStageFlags.ComputeBit, 0, (uint)sizeof(TonemapPush), &tonemap);
                 vk.CmdDispatch(_cmd, groupsX, groupsY, 1);
             }
 
             _device.FullBarrier(_cmd);
+
+            // ---- bloom ----
+
+            if (BloomScale > 0f && _bloomA != null)
+            {
+                DescriptorSet set = _bloomSet;
+                vk.CmdBindPipeline(_cmd, PipelineBindPoint.Compute, _bloomPipeline);
+                vk.CmdBindDescriptorSets(_cmd, PipelineBindPoint.Compute, _bloomPipelineLayout, 0, 1, &set, 0, null);
+
+                uint quarterX = (Math.Max(1u, (Width + 3) / 4) + 15) / 16;
+                uint quarterY = (Math.Max(1u, (Height + 3) / 4) + 15) / 16;
+
+                for (uint mode = 0; mode < 4; mode++)
+                {
+                    BloomPush bloom = new BloomPush
+                    {
+                        Mode = mode,
+                        // Measured: a blur of about 1.5% of the frame height, 3 quarter-texels at 812 rows.
+                        Sigma = Math.Max(0.5f, Height * (3f / 812f)),
+                        Scale = BloomScale,
+                    };
+
+                    vk.CmdPushConstants(_cmd, _bloomPipelineLayout, ShaderStageFlags.ComputeBit, 0, (uint)sizeof(BloomPush), &bloom);
+
+                    if (mode == 3)
+                        vk.CmdDispatch(_cmd, groupsX, groupsY, 1);
+                    else
+                        vk.CmdDispatch(_cmd, quarterX, quarterY, 1);
+
+                    _device.FullBarrier(_cmd);
+                }
+            }
 
             // ---- the editor's guides ----
 
@@ -1614,10 +1768,12 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             if (_acquired.Handle != 0) vk.DestroySemaphore(_device.Device, _acquired, null);
             if (_rendered.Handle != 0) vk.DestroySemaphore(_device.Device, _rendered, null);
 
-            if (_cmd.Handle != 0)
+            // The command buffer goes with the pool it came from.
+            if (_commandPool.Handle != 0)
             {
-                CommandBuffer cmd = _cmd;
-                vk.FreeCommandBuffers(_device.Device, _device.CommandPool, 1, &cmd);
+                _device.DestroyCommandPool(_commandPool);
+                _commandPool = default(CommandPool);
+                _cmd = default(CommandBuffer);
             }
 
             if (_pool.Handle != 0) vk.DestroyDescriptorPool(_device.Device, _pool, null);
@@ -1626,6 +1782,9 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             if (_denoisePipeline.Handle != 0) vk.DestroyPipeline(_device.Device, _denoisePipeline, null);
             if (_luminancePipeline.Handle != 0) vk.DestroyPipeline(_device.Device, _luminancePipeline, null);
             if (_tonemapPipeline.Handle != 0) vk.DestroyPipeline(_device.Device, _tonemapPipeline, null);
+            if (_bloomPipeline.Handle != 0) vk.DestroyPipeline(_device.Device, _bloomPipeline, null);
+            if (_bloomPipelineLayout.Handle != 0) vk.DestroyPipelineLayout(_device.Device, _bloomPipelineLayout, null);
+            if (_bloomSetLayout.Handle != 0) vk.DestroyDescriptorSetLayout(_device.Device, _bloomSetLayout, null);
 
             if (_rtPipelineLayout.Handle != 0) vk.DestroyPipelineLayout(_device.Device, _rtPipelineLayout, null);
             if (_denoisePipelineLayout.Handle != 0) vk.DestroyPipelineLayout(_device.Device, _denoisePipelineLayout, null);

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -113,6 +113,33 @@ namespace CSharp3D.Forms.Vulkan.Controls
         [Browsable(false)]
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public RendererControl CameraHost { get; set; }
+
+        /// <summary>
+        /// The host's own meshes the overlay pass draws on top of the picture: its
+        /// <see cref="RendererControl.ViewMeshes"/> and its <see cref="RendererControl.OverlayMeshes"/>,
+        /// which is where an editor puts its tool guides (drag previews, handles, markers).
+        /// </summary>
+        private IEnumerable<Mesh> HostMeshes
+        {
+            get
+            {
+                RendererControl host = CameraHost;
+
+                if (host == null)
+                    return null;
+
+                return ConcatHostMeshes(host);
+            }
+        }
+
+        private static IEnumerable<Mesh> ConcatHostMeshes(RendererControl host)
+        {
+            foreach (Mesh mesh in host.ViewMeshes)
+                yield return mesh;
+
+            foreach (Mesh mesh in host.OverlayMeshes)
+                yield return mesh;
+        }
 
         private RendererControl _ownHost;
 
@@ -240,6 +267,59 @@ namespace CSharp3D.Forms.Vulkan.Controls
             }
         }
 
+        /// <summary>
+        /// How each mesh is described to a game light model (see <see cref="GpuScene.Describer"/>);
+        /// when set it replaces <see cref="Classifier"/>.
+        /// </summary>
+        [Browsable(false)]
+        public Func<Mesh, GpuSurface> Describer
+        {
+            get => _describer;
+            set
+            {
+                _describer = value;
+
+                lock (_gate)
+                {
+                    if (_gpuScene != null)
+                    {
+                        _tracer?.WaitForGpu();
+                        _gpuScene.Describer = value;
+                    }
+                }
+            }
+        }
+
+        private Func<Mesh, GpuSurface> _describer;
+
+        /// <summary>The light model: physical (the default) or a game's compiler and engine.</summary>
+        [Browsable(false)]
+        public GpuLightModel LightModel { get; set; } = GpuLightModel.Default;
+
+        /// <summary>How the picture becomes screen bytes (a game model picks its engine's).</summary>
+        [Browsable(false)]
+        public TonemapMode Tonemap { get; set; } = TonemapMode.Filmic;
+
+        /// <summary>A fixed exposure for <see cref="TonemapMode.LinearExposure"/>; 0 adapts.</summary>
+        [Browsable(false)]
+        public float TonemapScale { get; set; }
+
+        /// <summary>Adapt the exposure as Source 2013 does (a game model's linear tone map).</summary>
+        [Browsable(false)]
+        public bool SourceAutoExposure { get; set; }
+
+        /// <summary>Source's mat_autoexposure_min / max.</summary>
+        [Browsable(false)]
+        public System.Numerics.Vector2 SourceExposureRange { get; set; } = new System.Numerics.Vector2(0.5f, 2f);
+
+        /// <summary>Source's bloom at this mat_bloomscale (0 for none).</summary>
+        [Browsable(false)]
+        public float BloomScale { get; set; }
+
+        /// <summary>Lights evaluated per sample before a random subset is taken.</summary>
+        [Category("Renderer")]
+        public int LightsPerSample { get; set; } = 8;
+
         public VulkanRendererControl()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.Opaque, true);
@@ -262,6 +342,24 @@ namespace CSharp3D.Forms.Vulkan.Controls
             _lightsPending = true;
             Invalidate();
         }
+
+        /// <summary>
+        /// The skybox rays see when they leave the world or pass through a sky face; null goes
+        /// back to the flat sky radiance given with the lights. <paramref name="radianceScale"/>
+        /// turns the faces' linear light into the radiance the lights are in. Takes effect on the
+        /// next frame.
+        /// </summary>
+        public void SetSkybox(SkyboxCube cube, float radianceScale)
+        {
+            _pendingSkybox = cube;
+            _pendingSkyboxScale = radianceScale;
+            _skyboxPending = true;
+            Invalidate();
+        }
+
+        private SkyboxCube _pendingSkybox;
+        private float _pendingSkyboxScale;
+        private bool _skyboxPending;
 
         private static Vector3 ToGl(LocationVector v)
         {
@@ -357,7 +455,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
                     _device = VulkanDevice.Shared;
                     _swapchain = new VulkanSwapchain(_device, Handle);
                     VulkanDevice.Stage("swapchain surface created");
-                    _gpuScene = new GpuScene(_device) { Classifier = _classifier ?? GpuScene.DefaultClassify };
+                    _gpuScene = new GpuScene(_device) { Classifier = _classifier ?? GpuScene.DefaultClassify, Describer = _describer };
                     VulkanDevice.Stage("gpu scene created");
                     _tracer = new RayTracer(_device, _gpuScene, new ShaderCompiler(Scene?.ShaderDirectory));
                     _tracer.UnitsPerMetre = UnitsPerMetre;
@@ -557,10 +655,25 @@ namespace CSharp3D.Forms.Vulkan.Controls
                         _lightsPending = false;
                     }
 
-                    if (_gpuScene.Sync(Scene, CameraHost?.ViewMeshes))
+                    if (_skyboxPending)
+                    {
+                        _gpuScene.SetSkybox(_pendingSkybox, _pendingSkyboxScale);
+                        _skyboxPending = false;
+                    }
+
+                    // The frame in flight reads the buffers the sync may replace: the sync waits
+                    // for it, but only if it is about to replace one.
+                    if (_gpuScene.Sync(Scene, HostMeshes, _tracer.WaitForGpu))
                         _tracer.Restart();
 
                     _tracer.Bounces = Bounces;
+                    _tracer.LightModel = LightModel;
+                    _tracer.Tonemap = Tonemap;
+                    _tracer.TonemapScale = TonemapScale;
+                    _tracer.SourceAutoExposure = SourceAutoExposure;
+                    _tracer.SourceExposureRange = SourceExposureRange;
+                    _tracer.BloomScale = BloomScale;
+                    _tracer.LightsPerSample = LightsPerSample;
                     _tracer.ExposureBias = ExposureBias;
                     _tracer.UnitsPerMetre = UnitsPerMetre;
                     _tracer.AutoExposure = AutoExposure;
@@ -653,6 +766,20 @@ namespace CSharp3D.Forms.Vulkan.Controls
             }
         }
 
+        /// <summary>
+        /// The host's guides changed - a tool redrew its preview - while the scene did not.
+        /// Picks them up without a full scene sync and without restarting the picture: the
+        /// guides sit on top of it. A host whose <see cref="CameraHost"/> is hidden under
+        /// this view must call it, since invalidating that hidden view reaches nobody. UI thread.
+        /// </summary>
+        public void RefreshOverlays()
+        {
+            if (!_initialized || !Visible)
+                return;
+
+            SyncOverlaysOnly();
+        }
+
         /// <summary>Gather the overlays alone - cheap - and ask for a frame if they changed. UI thread.</summary>
         private void SyncOverlaysOnly()
         {
@@ -668,7 +795,7 @@ namespace CSharp3D.Forms.Vulkan.Controls
                     if (_gpuScene == null)
                         return;
 
-                    changed = _gpuScene.SyncOverlays(Scene, CameraHost?.ViewMeshes);
+                    changed = _gpuScene.SyncOverlays(Scene, HostMeshes);
                 }
             }
             catch (Exception ex)

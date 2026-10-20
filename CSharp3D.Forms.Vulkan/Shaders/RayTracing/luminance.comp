@@ -29,12 +29,143 @@ layout(push_constant) uniform Push
     uint reset;            // start adapted at the target rather than easing to it
     uint fixedExposure;    // 1: use fixedEV100 as the adapted value, no adaptation
     float fixedEV100;
+    uint sourceAuto;       // 1: Source 2014's auto exposure instead (see sourceExposure)
+    float minScale;        // its mat_autoexposure_min / max
+    float maxScale;
 } push;
 
 shared float partial[256];
+shared uint bins[256];
+
+// ---- Source SDK 2013's auto exposure (client viewpostprocess.cpp + MaterialSystem, 2014) ----
+//
+// The game measures the 8-bit sRGB frame: 16 bins with edges (k/16)^1.5 over the gamma-space
+// luma of the central 90% x 85%, finds the luma below which 98% of the pixels lie (linear
+// within its bin), and aims the tone map scale T so that it lands on 0.60 - unless that luma is
+// already in the "sticky" bin [0.5701, 0.6495] that holds 0.60. A median floor of 0.03 keeps very
+// dark frames from going black; T stays in [min, max] (0.5..2 by default). The game eases T
+// towards that goal over seconds; a still view ends where the goal stops moving, which is what
+// is computed here directly: a fine histogram of the frame's linear luminance (exposure 1) once,
+// then the game's own histogram and rule re-evaluated for each T until it settles.
+
+const float FINE_MIN = -16.0;   // log2 range of the fine histogram
+const float FINE_SPAN = 20.0;
+
+float edge(uint k)
+{
+    return pow(float(k) / 16.0, 1.5);
+}
+
+// What the histogram bins measure. The client's comment says "gamma-space", but measured in
+// game the luma is linear: a frame with sunlit floor and sky in view (display 0.75) still
+// exposes ABOVE 1, which a gamma measure would have pushed below 1.
+float encode(float y)
+{
+    return clamp(y, 0.0, 1.0);
+}
+
+// The luma below which `share` of the counted pixels lie, as the game reads its 16 bins.
+float percentile(float t, float share, float total)
+{
+    float game[16];
+
+    for (uint j = 0u; j < 16u; j++)
+        game[j] = 0.0;
+
+    for (uint k = 0u; k < 256u; k++)
+    {
+        if (bins[k] == 0u)
+            continue;
+
+        float y = exp2(FINE_MIN + (float(k) + 0.5) * FINE_SPAN / 256.0);
+        float d = encode(y * t);
+        uint j = min(uint(pow(d, 1.0 / 1.5) * 16.0), 15u);
+        game[j] += float(bins[k]);
+    }
+
+    // From the top bin down, until (1 - share) of the pixels are above.
+    float above = (1.0 - share) * total;
+    float seen = 0.0;
+
+    for (int j = 15; j >= 0; j--)
+    {
+        if (seen + game[j] >= above && game[j] > 0.0)
+        {
+            float into = (above - seen) / game[j];
+            return mix(edge(uint(j) + 1u), edge(uint(j)), into);
+        }
+
+        seen += game[j];
+    }
+
+    return 0.0;
+}
+
+float sourceExposure(float current, float total)
+{
+    float t = current;
+
+    for (int iteration = 0; iteration < 24; iteration++)
+    {
+        float loc98 = percentile(t, 0.98, total);
+
+        // The sticky bin: 0.60 is already where the 98th percentile is.
+        if (loc98 >= edge(11u) && loc98 < edge(12u))
+            break;
+
+        float target = 0.60 / max(loc98, 1.0e-4) * t;
+        float loc50 = percentile(t, 0.50, total);
+        float floorTarget = 0.03 / max(loc50, 1.0e-4) * t;
+
+        if (floorTarget > target)
+            target = floorTarget;
+
+        target = clamp(target, max(push.minScale, 0.001), push.maxScale);
+
+        if (abs(target - t) < 1.0e-4)
+            break;
+
+        t = target;
+    }
+
+    return t;
+}
 
 void main()
 {
+    if (push.sourceAuto != 0u)
+    {
+        ivec2 size = imageSize(hdr);
+        uint id = gl_LocalInvocationID.x;
+        bins[id] = 0u;
+        barrier();
+
+        // The central 90% x 85% (mat_exposure_center_region_x / _y).
+        ivec2 lo = ivec2(vec2(size) * vec2(0.05, 0.075));
+        ivec2 hi = ivec2(vec2(size) * vec2(0.95, 0.925));
+        uint width = uint(max(hi.x - lo.x, 1));
+        uint count = width * uint(max(hi.y - lo.y, 1));
+
+        for (uint i = id; i < count; i += 256u)
+        {
+            ivec2 pixel = lo + ivec2(int(i % width), int(i / width));
+            float y = dot(imageLoad(hdr, pixel).rgb, vec3(0.2125, 0.7154, 0.0721));
+            float f = (log2(max(y, 1.0e-6)) - FINE_MIN) / FINE_SPAN * 256.0;
+            atomicAdd(bins[uint(clamp(f, 0.0, 255.0))], 1u);
+        }
+
+        barrier();
+
+        if (id == 0u)
+        {
+            float start = push.reset != 0u || exposure <= 0.0 ? 1.0 : exposure;
+            exposure = sourceExposure(start, float(count));
+            adaptedLogLum = log2(exposure);
+        }
+
+        return;
+    }
+
     ivec2 size = imageSize(hdr);
     uint total = uint(size.x * size.y);
     uint id = gl_LocalInvocationID.x;

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Silk.NET.Core;
@@ -66,6 +66,16 @@ namespace CSharp3D.Forms.Vulkan.Vk
         public Device Device { get; private set; }
         public Queue Queue { get; private set; }
         public uint QueueFamily { get; private set; }
+        /// <summary>
+        /// The device's own pool, for its own setup work. NOT for a caller to record into: a
+        /// command pool is externally synchronised in Vulkan, which means the pool AND every
+        /// buffer allocated from it belong to one thread at a time - vkAllocateCommandBuffers,
+        /// vkBeginCommandBuffer, every vkCmd, vkEndCommandBuffer and vkFreeCommandBuffers alike.
+        /// Two ray traced views recording their frames from their own threads into buffers from
+        /// one pool is undefined behaviour, and shows up as an access violation inside the
+        /// driver. Anything that records commands takes its own pool from
+        /// <see cref="CreateCommandPool"/>.
+        /// </summary>
         public CommandPool CommandPool { get; private set; }
 
         public KhrSurface KhrSurface { get; private set; }
@@ -733,50 +743,109 @@ namespace CSharp3D.Forms.Vulkan.Vk
                 0, 1, &barrier, 0, null, 0, null);
         }
 
+        // ==================== command pools ====================
+
+        /// <summary>
+        /// A command pool of the caller's own, to record into from its own thread. Destroy it
+        /// with <see cref="DestroyCommandPool"/>. See <see cref="CommandPool"/> for why sharing
+        /// one is not an option.
+        /// </summary>
+        public CommandPool CreateCommandPool()
+        {
+            CommandPoolCreateInfo info = new CommandPoolCreateInfo
+            {
+                SType = StructureType.CommandPoolCreateInfo,
+                QueueFamilyIndex = QueueFamily,
+                Flags = CommandPoolCreateFlags.ResetCommandBufferBit,
+            };
+
+            CommandPool pool;
+            Check(Api.CreateCommandPool(Device, &info, null, &pool), "vkCreateCommandPool");
+            return pool;
+        }
+
+        public void DestroyCommandPool(CommandPool pool)
+        {
+            if (pool.Handle != 0)
+                Api.DestroyCommandPool(Device, pool, null);
+        }
+
         // ==================== one-shot commands ====================
+
+        /// <summary>
+        /// The pool each one-shot in flight was allocated from, so <see cref="EndOneShot"/> can
+        /// give it back. A pool per one-shot rather than a shared one, because these are called
+        /// from whichever thread happens to be setting something up - a scene sync on the UI
+        /// thread of one view, a mesh upload on the render thread of another - and a pool cannot
+        /// be shared across those. Creating one costs nothing next to the queue wait below.
+        /// </summary>
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<nint, CommandPool> _oneShotPools =
+            new System.Collections.Concurrent.ConcurrentDictionary<nint, CommandPool>();
 
         public CommandBuffer BeginOneShot()
         {
+            CommandPool pool = CreateCommandPool();
+
             CommandBufferAllocateInfo allocate = new CommandBufferAllocateInfo
             {
                 SType = StructureType.CommandBufferAllocateInfo,
-                CommandPool = CommandPool,
+                CommandPool = pool,
                 Level = CommandBufferLevel.Primary,
                 CommandBufferCount = 1,
             };
 
             CommandBuffer cmd;
-            Check(Api.AllocateCommandBuffers(Device, &allocate, &cmd), "vkAllocateCommandBuffers");
 
-            CommandBufferBeginInfo begin = new CommandBufferBeginInfo
+            try
             {
-                SType = StructureType.CommandBufferBeginInfo,
-                Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
-            };
+                Check(Api.AllocateCommandBuffers(Device, &allocate, &cmd), "vkAllocateCommandBuffers");
 
-            Check(Api.BeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
+                CommandBufferBeginInfo begin = new CommandBufferBeginInfo
+                {
+                    SType = StructureType.CommandBufferBeginInfo,
+                    Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
+                };
+
+                Check(Api.BeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
+            }
+            catch (Exception)
+            {
+                DestroyCommandPool(pool);
+                throw;
+            }
+
+            _oneShotPools[cmd.Handle] = pool;
             return cmd;
         }
 
         /// <summary>Submit and wait. Setup work only; a frame never waits like this.</summary>
         public void EndOneShot(CommandBuffer cmd)
         {
-            Check(Api.EndCommandBuffer(cmd), "vkEndCommandBuffer");
+            CommandPool pool;
+            _oneShotPools.TryRemove(cmd.Handle, out pool);
 
-            SubmitInfo submit = new SubmitInfo
+            try
             {
-                SType = StructureType.SubmitInfo,
-                CommandBufferCount = 1,
-                PCommandBuffers = &cmd,
-            };
+                Check(Api.EndCommandBuffer(cmd), "vkEndCommandBuffer");
 
-            lock (QueueGate)
-            {
-                Check(Api.QueueSubmit(Queue, 1, &submit, default), "vkQueueSubmit");
-                Check(Api.QueueWaitIdle(Queue), "vkQueueWaitIdle");
+                SubmitInfo submit = new SubmitInfo
+                {
+                    SType = StructureType.SubmitInfo,
+                    CommandBufferCount = 1,
+                    PCommandBuffers = &cmd,
+                };
+
+                lock (QueueGate)
+                {
+                    Check(Api.QueueSubmit(Queue, 1, &submit, default), "vkQueueSubmit");
+                    Check(Api.QueueWaitIdle(Queue), "vkQueueWaitIdle");
+                }
             }
-
-            Api.FreeCommandBuffers(Device, CommandPool, 1, &cmd);
+            finally
+            {
+                // The buffer goes with the pool; freeing it separately would be redundant.
+                DestroyCommandPool(pool);
+            }
         }
 
         public void WaitIdle()

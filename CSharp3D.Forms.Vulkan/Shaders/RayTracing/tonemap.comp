@@ -17,6 +17,18 @@ layout(set = 0, binding = 2, std430) buffer Exposure
     float pad0, pad1;
 };
 
+// How the composed picture becomes bytes (TonemapMode in GpuTypes.cs).
+const uint MODE_FILMIC = 0u;            // exposure, ACES, sRGB: Unreal's default
+const uint MODE_DISPLAY = 1u;           // already screen values (GoldSrc, Quake II): clamp only
+const uint MODE_LINEAR_EXPOSURE = 2u;   // linear x exposure, clamp, sRGB: Source's integer HDR
+
+layout(push_constant) uniform Push
+{
+    uint mode;
+    float fixedScale;   // MODE_LINEAR_EXPOSURE: the exposure; 0 = what the exposure pass adapted to
+    float pad0, pad1;
+} push;
+
 // Stephen Hill's fit of the ACES RRT + sRGB ODT.
 const mat3 ACES_INPUT = mat3(
     0.59719, 0.07600, 0.02840,
@@ -56,7 +68,22 @@ void main()
     if (pixel.x >= size.x || pixel.y >= size.y)
         return;
 
-    vec3 hdrColor = imageLoad(hdr, pixel).rgb * exposure;
+    vec3 composed = imageLoad(hdr, pixel).rgb;
+
+    if (push.mode == MODE_DISPLAY)
+    {
+        imageStore(ldr, pixel, vec4(clamp(composed, 0.0, 1.0), 1.0));
+        return;
+    }
+
+    if (push.mode == MODE_LINEAR_EXPOSURE)
+    {
+        float scale = push.fixedScale > 0.0 ? push.fixedScale : exposure;
+        imageStore(ldr, pixel, vec4(linearToSrgb(clamp(composed * scale, 0.0, 1.0)), 1.0));
+        return;
+    }
+
+    vec3 hdrColor = composed * exposure;
     vec3 mapped = acesFilmic(hdrColor);
 
     imageStore(ldr, pixel, vec4(linearToSrgb(mapped), 1.0));

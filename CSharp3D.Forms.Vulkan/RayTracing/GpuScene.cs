@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -53,9 +53,229 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         public Buffer MaterialBuffer { get; private set; }
         public Buffer LightBuffer { get; private set; }
         public int LightCount { get; private set; }
+
+        /// <summary>Whether any instance is see-through (glass, fences, additive faces).</summary>
+        public bool HasSeeThrough { get; private set; }
         public Vector3 SkyRadiance { get; private set; }
         public Sampler Sampler { get; private set; }
-        public IReadOnlyList<Image> Textures => _textures;
+        /// <summary>
+        /// Every sampled image, in descriptor order: the scene's own textures, then the sky faces
+        /// that are present. One array because the texture binding has a variable count and so
+        /// must stay the last binding of the set; <see cref="SkyFaceIndex"/> says where each face is.
+        /// </summary>
+        public IReadOnlyList<Image> Textures
+        {
+            get
+            {
+                if (_allTexturesVersion != Version)
+                {
+                    _allTextures.Clear();
+                    _allTextures.AddRange(_textures);
+
+                    for (int i = 0; i < 6; i++)
+                    {
+                        _skyTextureIndex[i] = -1;
+
+                        if (_skyImages[i] == null)
+                            continue;
+
+                        _skyTextureIndex[i] = _allTextures.Count;
+                        _allTextures.Add(_skyImages[i]);
+                    }
+
+                    _allTexturesVersion = Version;
+                }
+
+                return _allTextures;
+            }
+        }
+
+        private readonly List<Image> _allTextures = new List<Image>();
+        private int _allTexturesVersion = -1;
+
+        // ==================== sky ====================
+
+        /// <summary>A cube face's index in <see cref="Textures"/>, in cube order, or -1 when it is absent.</summary>
+        public int SkyFaceIndex(int face)
+        {
+            IReadOnlyList<Image> refreshed = Textures;
+            return _skyTextureIndex[face];
+        }
+
+        /// <summary>Bit i set when cube face i holds only the sky above the horizon.</summary>
+        public uint SkyHalfMask { get; private set; }
+
+        /// <summary>What a sky texel is multiplied by to be radiance in this renderer's units; 0 with no sky.</summary>
+        public float SkyScale { get; private set; }
+
+        /// <summary>World (GL space) to the cube's frame, rows as in <see cref="SkyboxCube.CubeFromWorld"/>.</summary>
+        public System.Numerics.Matrix4x4 CubeFromWorld { get; private set; } = System.Numerics.Matrix4x4.Identity;
+
+        private readonly Image[] _skyImages = new Image[6];
+        private readonly int[] _skyTextureIndex = { -1, -1, -1, -1, -1, -1 };
+        private SkyboxCube _pendingSky;
+        private int _pendingSkyVersion = -1;
+        private float _pendingSkyScale;
+        private bool _skyDirty;
+        private SkyboxCube _uploadedSky;
+        private int _uploadedSkyVersion = -1;
+
+        /// <summary>
+        /// The sky rays see when they leave the world or pass through a sky face; null goes back
+        /// to the flat sky radiance. <paramref name="scale"/> turns the faces' linear light into
+        /// this renderer's radiance. Takes effect at the next sync.
+        /// </summary>
+        public void SetSkybox(SkyboxCube cube, float scale)
+        {
+            int version = cube != null ? cube.Version : -1;
+
+            if (ReferenceEquals(cube, _pendingSky) && version == _pendingSkyVersion && scale == _pendingSkyScale)
+                return;
+
+            _pendingSky = cube;
+            _pendingSkyVersion = version;
+            _pendingSkyScale = scale;
+            _skyDirty = true;
+        }
+
+        /// <summary>Puts the pending sky on the card. Only the faces go up; nothing is rebuilt.</summary>
+        private void UploadSky()
+        {
+            _skyDirty = false;
+
+            SkyboxCube cube = _pendingSky;
+            SkyScale = cube != null ? _pendingSkyScale : 0f;
+
+            if (ReferenceEquals(cube, _uploadedSky) && _pendingSkyVersion == _uploadedSkyVersion)
+            {
+                Version++;
+                return;
+            }
+
+            _device.WaitIdle();
+
+            for (int i = 0; i < 6; i++)
+            {
+                _skyImages[i]?.Dispose();
+                _skyImages[i] = null;
+            }
+
+            SkyHalfMask = 0;
+
+            if (cube != null)
+            {
+                Matrix3 m = cube.CubeFromWorld;
+
+                CubeFromWorld = new System.Numerics.Matrix4x4(
+                    m.M11, m.M12, m.M13, 0f,
+                    m.M21, m.M22, m.M23, 0f,
+                    m.M31, m.M32, m.M33, 0f,
+                    0f, 0f, 0f, 1f);
+
+                for (int i = 0; i < 6; i++)
+                {
+                    SkyboxCubeFace face = cube.Faces[i];
+
+                    if (face == null)
+                        continue;
+
+                    _skyImages[i] = UploadFloat(face);
+
+                    if (_skyImages[i] != null && cube.IsHalfHeight(i))
+                        SkyHalfMask |= 1u << i;
+                }
+            }
+
+            _uploadedSky = cube;
+            _uploadedSkyVersion = _pendingSkyVersion;
+            Version++;
+        }
+
+        /// <summary>
+        /// A sky face as half floats, one level: a ray that reaches the sky has no footprint to
+        /// pick a mip from, and the sky is only ever seen magnified.
+        /// </summary>
+        private Image UploadFloat(SkyboxCubeFace face)
+        {
+            uint width = (uint)face.Width;
+            uint height = (uint)face.Height;
+            int pixels = face.Width * face.Height;
+
+            ushort[] halves = new ushort[pixels * 4];
+
+            for (int p = 0; p < pixels; p++)
+            {
+                halves[p * 4] = HalfFrom(face.Rgb[p * 3]);
+                halves[p * 4 + 1] = HalfFrom(face.Rgb[p * 3 + 1]);
+                halves[p * 4 + 2] = HalfFrom(face.Rgb[p * 3 + 2]);
+                halves[p * 4 + 3] = 0x3C00;   // 1.0
+            }
+
+            ulong bytes = (ulong)halves.Length * 2;
+
+            Buffer staging = _device.CreateBuffer(bytes, BufferUsageFlags.TransferSrcBit,
+                MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit);
+
+            staging.Write(halves);
+
+            Image image = _device.CreateImage(width, height, Format.R16G16B16A16Sfloat,
+                ImageUsageFlags.SampledBit | ImageUsageFlags.TransferDstBit, 1);
+
+            CommandBuffer cmd = _device.BeginOneShot();
+            _device.Transition(cmd, image, ImageLayout.TransferDstOptimal, 1);
+
+            BufferImageCopy region = new BufferImageCopy
+            {
+                ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+                ImageExtent = new Extent3D(width, height, 1),
+            };
+
+            _device.Api.CmdCopyBufferToImage(cmd, staging.Handle, image.Handle, ImageLayout.TransferDstOptimal, 1, &region);
+
+            MipBarrier(cmd, image, 0, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal);
+            image.Layout = ImageLayout.ShaderReadOnlyOptimal;
+
+            _device.EndOneShot(cmd);
+            staging.Dispose();
+
+            return image;
+        }
+
+        /// <summary>An IEEE half from a float, rounded to nearest; negatives and NaN go to 0, the rest clamps to the largest finite half.</summary>
+        private static ushort HalfFrom(float value)
+        {
+            if (float.IsNaN(value) || value <= 0f)
+                return 0;
+
+            if (value >= 65504f)
+                return 0x7BFF;
+
+            uint bits = BitConverter.ToUInt32(BitConverter.GetBytes(value), 0);
+            int exponent = (int)((bits >> 23) & 0xFF) - 127 + 15;
+            uint mantissa = bits & 0x7FFFFF;
+
+            if (exponent <= 0)
+            {
+                if (exponent < -10)
+                    return 0;
+
+                mantissa |= 0x800000;
+                int shift = 14 - exponent;
+                uint small = mantissa >> shift;
+
+                if (((mantissa >> (shift - 1)) & 1) != 0)
+                    small++;
+
+                return (ushort)small;
+            }
+
+            uint result = ((uint)exponent << 10) | (mantissa >> 13);
+
+            if ((mantissa & 0x1000) != 0)
+                result++;
+
+            return (ushort)Math.Min(result, 0x7BFFu);
+        }
         public int GeometryCount => _entries.Count;
 
         /// <summary>The key this scene uses when asking a mesh whether its vertices changed.</summary>
@@ -69,7 +289,30 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             public Color Color;
             public Bitmap Albedo;
             public int MaterialIndex;
+
+            /// <summary>What the host said about the mesh (Describer); null without one.</summary>
+            public GpuSurface Surface;
+
+            /// <summary>Which rays may hit it: the Mask* bits.</summary>
+            public uint Mask;
         }
+
+        // Instance masks, the same bits as common.glsl: what primary and bounce rays see (opaque,
+        // or see-through and handled hit by hit), the sky, and what blocks the light.
+        public const uint MaskVisible = 0x1;
+        public const uint MaskTransparent = 0x2;
+        public const uint MaskSky = 0x4;
+        public const uint MaskOccluder = 0x8;
+
+        /// <summary>Editor-only surfaces (<see cref="GpuSurface.FlagEditorOnly"/>): seen by camera rays, never by lighting.</summary>
+        public const uint MaskEditor = 0x10;
+
+        /// <summary>
+        /// How the host describes each mesh to a game light model. When set it replaces
+        /// <see cref="Classifier"/>: null (or Skip) leaves a mesh out, and see-through
+        /// surfaces are kept and drawn see-through instead of being dropped.
+        /// </summary>
+        public Func<Mesh, GpuSurface> Describer { get; set; }
 
         private readonly List<Entry> _entries = new List<Entry>();
         private readonly Dictionary<Bitmap, int> _textureIndices = new Dictionary<Bitmap, int>();
@@ -79,10 +322,18 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         private Buffer _indexBuffer;
         private Buffer _instanceBuffer;
         private Buffer _tlasBuffer;
-        private Buffer _opaqueBlasBuffer;
-        private Buffer _skyBlasBuffer;
-        private AccelerationStructureKHR _opaqueBlas;
-        private AccelerationStructureKHR _skyBlas;
+
+        /// <summary>One bottom-level structure per distinct mask.</summary>
+        private readonly List<AccelerationStructureKHR> _blases = new List<AccelerationStructureKHR>();
+        private readonly List<Buffer> _blasBuffers = new List<Buffer>();
+
+        /// <summary>The triangles that emit light, for direct sampling. Never null.</summary>
+        public Buffer EmitterBuffer { get; private set; }
+
+        public int EmitterCount { get; private set; }
+
+        /// <summary>The emitters' total power (the sum the sampling CDF ends at).</summary>
+        public float EmitterPower { get; private set; }
 
         private GpuLight[] _lights = new GpuLight[0];
         private bool _lightsDirty = true;
@@ -114,9 +365,38 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
             // Empty placeholders, so a view can bind before the first sync.
             GeometryBuffer = _device.CreateBuffer(32, BufferUsageFlags.StorageBufferBit, MemoryPropertyFlags.DeviceLocalBit);
-            MaterialBuffer = _device.CreateBuffer(32, BufferUsageFlags.StorageBufferBit, MemoryPropertyFlags.DeviceLocalBit);
-            LightBuffer = _device.CreateBuffer(64, BufferUsageFlags.StorageBufferBit,
+            MaterialBuffer = _device.CreateBuffer(112, BufferUsageFlags.StorageBufferBit, MemoryPropertyFlags.DeviceLocalBit);
+            LightBuffer = _device.CreateBuffer(96, BufferUsageFlags.StorageBufferBit,
                 MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit);
+            EmitterBuffer = _device.CreateBuffer(80, BufferUsageFlags.StorageBufferBit, MemoryPropertyFlags.DeviceLocalBit);
+        }
+
+        /// <summary>Which rays may hit a mesh of this class and surface.</summary>
+        private static uint MaskOf(MeshClass cls, GpuSurface surface)
+        {
+            if (cls == MeshClass.Sky)
+                return MaskSky;
+
+            if (surface == null)
+                return MaskVisible | MaskOccluder;
+
+            uint mask = 0;
+
+            if ((surface.Flags & GpuSurface.FlagEditorOnly) != 0)
+            {
+                // Camera rays only (raygen's traceGame adds MASK_EDITOR to its first trace).
+                mask |= MaskEditor;
+            }
+            else if ((surface.Flags & GpuSurface.FlagNoDraw) == 0)
+            {
+                bool seeThrough = (surface.Flags & (GpuSurface.FlagTranslucent | GpuSurface.FlagAlphaTest | GpuSurface.FlagAdditive)) != 0;
+                mask |= seeThrough ? MaskTransparent : MaskVisible;
+            }
+
+            if ((surface.Flags & GpuSurface.FlagNoShadow) == 0)
+                mask |= MaskOccluder;
+
+            return mask;
         }
 
         /// <summary>
@@ -165,7 +445,8 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             for (int i = 0; i < a.Length; i++)
             {
                 if (a[i].PositionRadius != b[i].PositionRadius || a[i].DirectionCone != b[i].DirectionCone
-                    || a[i].Radiance != b[i].Radiance || a[i].Params != b[i].Params)
+                    || a[i].Radiance != b[i].Radiance || a[i].Params != b[i].Params
+                    || a[i].Atten != b[i].Atten || a[i].Extra != b[i].Extra)
                     return false;
             }
 
@@ -197,15 +478,30 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             return true;
         }
 
-        public bool Sync(Scene scene, IEnumerable<Mesh> viewMeshes = null)
+        /// <param name="beforeGpuChange">
+        /// Called once, just before the first buffer the frame in flight may be reading is
+        /// replaced - the host waits for that frame there. A paint that changes nothing (the
+        /// common case: the window was uncovered, a tooltip came and went) never waits for the
+        /// GPU, so a slow frame cannot stall the UI.
+        /// </param>
+        public bool Sync(Scene scene, IEnumerable<Mesh> viewMeshes = null, Action beforeGpuChange = null)
         {
             bool changed = false;
+            bool ready = beforeGpuChange == null;
 
             SyncOverlays(scene, viewMeshes);
 
             if (_lightsDirty)
             {
+                if (!ready) { beforeGpuChange(); ready = true; }
                 UploadLights();
+                changed = true;
+            }
+
+            if (_skyDirty)
+            {
+                if (!ready) { beforeGpuChange(); ready = true; }
+                UploadSky();
                 changed = true;
             }
 
@@ -216,12 +512,15 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
             if (NeedsRebuild(wanted))
             {
+                if (!ready) { beforeGpuChange(); ready = true; }
                 Rebuild(wanted);
                 return true;
             }
 
             if (MaterialsChanged(wanted))
             {
+                if (!ready) { beforeGpuChange(); ready = true; }
+
                 // Same geometry, different tints (a selection changed): only the material
                 // records move, and only the textures that are new go up.
                 for (int i = 0; i < wanted.Count; i++)
@@ -247,18 +546,34 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 if (mesh == null)
                     continue;
 
-                MeshClass cls = Classifier(mesh);
-
-                if (cls == MeshClass.Skip)
-                    continue;
+                GpuSurface surface = null;
+                MeshClass cls;
 
                 // The GL renderer draws a mesh with no material plain white; so does this.
                 Material material = mesh.Material;
 
-                // Glass and glows are the GL renderer's problem for now: drawn opaque they
-                // would wall off rooms behind a window.
-                if (material != null && (material.Translucent || material.Additive || material.Alpha < 1f))
-                    continue;
+                if (Describer != null)
+                {
+                    surface = Describer(mesh);
+
+                    if (surface == null || surface.Class == MeshClass.Skip)
+                        continue;
+
+                    cls = surface.Class;
+                }
+                else
+                {
+                    cls = Classifier(mesh);
+
+                    if (cls == MeshClass.Skip)
+                        continue;
+
+                    // Without a host to say how a see-through surface is drawn, glass and
+                    // glows are left to the GL renderer: drawn opaque they would wall off
+                    // rooms behind a window.
+                    if (material != null && (material.Translucent || material.Additive || material.Alpha < 1f))
+                        continue;
+                }
 
                 if (mesh.GetIndexCount() < 3)
                     continue;
@@ -269,7 +584,9 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                     Class = cls,
                     Transform = mesh.GetModelMatrix(Matrix4.Identity),
                     Color = material != null ? material.Color : Color.White,
-                    Albedo = material != null && material.Albedo != null ? material.Albedo.Bitmap : null,
+                    Albedo = surface?.Albedo ?? (material != null && material.Albedo != null ? material.Albedo.Bitmap : null),
+                    Surface = surface,
+                    Mask = MaskOf(cls, surface),
                 });
             }
 
@@ -286,7 +603,11 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 Entry now = wanted[i];
                 Entry was = _entries[i];
 
-                if (!ReferenceEquals(now.Mesh, was.Mesh) || now.Class != was.Class)
+                if (!ReferenceEquals(now.Mesh, was.Mesh) || now.Class != was.Class || now.Mask != was.Mask)
+                    return true;
+
+                // The emitters are built with the geometry.
+                if ((now.Surface?.Emission ?? Vector3.Zero) != (was.Surface?.Emission ?? Vector3.Zero))
                     return true;
 
                 if (now.Transform != was.Transform)
@@ -305,6 +626,9 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             {
                 if (wanted[i].Color != _entries[i].Color || !ReferenceEquals(wanted[i].Albedo, _entries[i].Albedo))
                     return true;
+
+                if (!Equals(wanted[i].Surface, _entries[i].Surface))
+                    return true;
             }
 
             return false;
@@ -320,12 +644,16 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
             _entries.Clear();
             _entries.AddRange(wanted);
+            HasSeeThrough = wanted.Exists(e => (e.Mask & MaskTransparent) != 0);
 
             List<float> vertices = new List<float>();
             List<uint> indices = new List<uint>();
             List<GeometryRecord> records = new List<GeometryRecord>();
-            List<int> opaqueGeometries = new List<int>();
-            List<int> skyGeometries = new List<int>();
+
+            // Records grouped by mask, in first-seen order: one bottom-level structure each.
+            List<uint> groupMasks = new List<uint>();
+            List<List<int>> groups = new List<List<int>>();
+            List<GpuEmitter> emitters = new List<GpuEmitter>();
 
             // Where each record's data starts, in elements; addresses are added once the
             // buffers exist.
@@ -383,11 +711,22 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 indexStarts.Add(indexStart);
                 indexCounts.Add(meshIndices.Length);
 
-                if (entry.Class == MeshClass.Sky)
-                    skyGeometries.Add(record);
-                else
-                    opaqueGeometries.Add(record);
+                int group = groupMasks.IndexOf(entry.Mask);
+
+                if (group < 0)
+                {
+                    group = groupMasks.Count;
+                    groupMasks.Add(entry.Mask);
+                    groups.Add(new List<int>());
+                }
+
+                groups[group].Add(record);
+
+                if (entry.Surface != null && entry.Surface.Emission != Vector3.Zero)
+                    AddEmitters(vertices, vertexStart, meshIndices, i, entry.Surface.Emission, emitters);
             }
+
+            UploadEmitters(emitters);
 
             if (records.Count == 0)
             {
@@ -410,10 +749,16 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
                 recordArray[r].IndexAddress = _indexBuffer.DeviceAddress + (ulong)indexStarts[r] * 4;
             }
 
-            // The records are ordered opaque first, then sky, so each instance's records are
-            // contiguous and gl_InstanceCustomIndexEXT + gl_GeometryIndexEXT lands on them.
-            List<int> order = new List<int>(opaqueGeometries);
-            order.AddRange(skyGeometries);
+            // The records are ordered group by group, so each instance's records are contiguous
+            // and gl_InstanceCustomIndexEXT + gl_GeometryIndexEXT lands on them.
+            List<int> order = new List<int>();
+            List<uint> firstRecords = new List<uint>();
+
+            foreach (List<int> members in groups)
+            {
+                firstRecords.Add((uint)order.Count);
+                order.AddRange(members);
+            }
 
             GeometryRecord[] ordered = new GeometryRecord[order.Count];
 
@@ -425,12 +770,87 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
 
             UploadMaterials();
 
-            _opaqueBlas = BuildBlas(opaqueGeometries, recordArray, vertexCounts, indexCounts, out _opaqueBlasBuffer);
-            _skyBlas = BuildBlas(skyGeometries, recordArray, vertexCounts, indexCounts, out _skyBlasBuffer);
+            List<TlasInstance> instances = new List<TlasInstance>();
 
-            BuildTlas(opaqueGeometries.Count);
+            for (int g = 0; g < groups.Count; g++)
+            {
+                Buffer storage;
+                AccelerationStructureKHR blas = BuildBlas(groups[g], recordArray, vertexCounts, indexCounts, out storage);
+
+                if (blas.Handle == 0)
+                    continue;
+
+                _blases.Add(blas);
+                _blasBuffers.Add(storage);
+                instances.Add(MakeInstance(blas, firstRecords[g], groupMasks[g]));
+            }
+
+            BuildTlas(instances);
 
             Version++;
+        }
+
+        /// <summary>
+        /// The triangles of an emitting surface, already in world space in <paramref name="vertices"/>,
+        /// into the emitter list. Each is weighted by its power for the sampling CDF.
+        /// </summary>
+        private static void AddEmitters(List<float> vertices, int vertexStart, uint[] indices, int material, Vector3 emission,
+            List<GpuEmitter> emitters)
+        {
+            float strength = Math.Max(emission.X, Math.Max(emission.Y, emission.Z));
+
+            for (int t = 0; t + 2 < indices.Length; t += 3)
+            {
+                Vector3 a = VertexAt(vertices, vertexStart + (int)indices[t]);
+                Vector3 b = VertexAt(vertices, vertexStart + (int)indices[t + 1]);
+                Vector3 c = VertexAt(vertices, vertexStart + (int)indices[t + 2]);
+
+                Vector3 cross = Vector3.Cross(b - a, c - a);
+                float area = cross.Length() * 0.5f;
+
+                if (area < 1e-6f)
+                    continue;
+
+                // The face's own normal, the side its texture is on: the mesh's vertex normal.
+                int n = (vertexStart + (int)indices[t]) * 8;
+                Vector3 normal = new Vector3(vertices[n + 3], vertices[n + 4], vertices[n + 5]);
+                normal = normal.LengthSquared() > 1e-8f ? Vector3.Normalize(normal) : Vector3.Normalize(cross);
+
+                emitters.Add(new GpuEmitter
+                {
+                    P0 = new Vector4(a, area),
+                    P1 = new Vector4(b, 0f),
+                    P2 = new Vector4(c, area * strength),
+                    Normal = new Vector4(normal, material),
+                    Intensity = new Vector4(emission, 0f),
+                });
+            }
+        }
+
+        private static Vector3 VertexAt(List<float> vertices, int index)
+        {
+            int o = index * 8;
+            return new Vector3(vertices[o], vertices[o + 1], vertices[o + 2]);
+        }
+
+        private void UploadEmitters(List<GpuEmitter> emitters)
+        {
+            float cumulative = 0f;
+
+            for (int k = 0; k < emitters.Count; k++)
+            {
+                GpuEmitter e = emitters[k];
+                cumulative += e.P2.W;
+                e.P1.W = cumulative;
+                emitters[k] = e;
+            }
+
+            EmitterBuffer?.Dispose();
+            EmitterBuffer = emitters.Count > 0
+                ? _device.CreateDeviceBuffer(emitters.ToArray(), BufferUsageFlags.StorageBufferBit, deviceAddress: false)
+                : _device.CreateBuffer(80, BufferUsageFlags.StorageBufferBit, MemoryPropertyFlags.DeviceLocalBit);
+            EmitterCount = emitters.Count;
+            EmitterPower = cumulative;
         }
 
         /// <summary>Vertices through the mesh's own transform, into the shared array.</summary>
@@ -468,14 +888,25 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             {
                 Entry entry = _entries[i];
 
+                GpuSurface s = entry.Surface;
+
                 materials[i] = new MaterialRecord
                 {
-                    Color = new Vector4(entry.Color.R / 255f, entry.Color.G / 255f, entry.Color.B / 255f, 1f),
+                    Color = new Vector4(entry.Color.R / 255f, entry.Color.G / 255f, entry.Color.B / 255f, s != null ? s.Alpha : 1f),
                     AlbedoTexture = TextureIndex(entry.Albedo),
-                    Flags = entry.Class == MeshClass.Sky ? MaterialRecord.FlagSky : 0u,
+                    Flags = (entry.Class == MeshClass.Sky ? MaterialRecord.FlagSky : 0u) | (s != null ? s.Flags : 0u),
                     Roughness = DefaultRoughness,
                     Metallic = 0f,
                 };
+
+                if (s != null)
+                {
+                    materials[i].LightmapS = s.LightmapS;
+                    materials[i].LightmapT = s.LightmapT;
+                    materials[i].Emission = new Vector4(s.SelfLight, Math.Max(s.Emission.X, Math.Max(s.Emission.Y, s.Emission.Z)));
+                    materials[i].Reflectivity = new Vector4(s.Reflectivity, 0f);
+                    materials[i].Params = new Vector4(s.SampleOffset, s.AlphaTestReference, s.UnlitFactor, s.PatchSize * 0.5f);
+                }
             }
 
             MaterialBuffer.Dispose();
@@ -487,7 +918,7 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
         {
             GpuLight[] lights = _lights.Length > 0 ? _lights : new GpuLight[1];
 
-            ulong size = (ulong)(lights.Length * 64);
+            ulong size = (ulong)(lights.Length * 96);
 
             if (LightBuffer == null || LightBuffer.Size < size)
             {
@@ -723,16 +1154,8 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             }
         }
 
-        private void BuildTlas(int opaqueRecordCount)
+        private void BuildTlas(List<TlasInstance> instances)
         {
-            List<TlasInstance> instances = new List<TlasInstance>();
-
-            if (_opaqueBlas.Handle != 0)
-                instances.Add(MakeInstance(_opaqueBlas, customIndex: 0, mask: 0x1));
-
-            if (_skyBlas.Handle != 0)
-                instances.Add(MakeInstance(_skyBlas, customIndex: (uint)opaqueRecordCount, mask: 0x2));
-
             if (instances.Count == 0)
                 return;
 
@@ -864,8 +1287,15 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             DestroyStructure(ref tlas, ref _tlasBuffer);
             Tlas = default;
 
-            DestroyStructure(ref _opaqueBlas, ref _opaqueBlasBuffer);
-            DestroyStructure(ref _skyBlas, ref _skyBlasBuffer);
+            for (int i = 0; i < _blases.Count; i++)
+            {
+                AccelerationStructureKHR blas = _blases[i];
+                Buffer storage = _blasBuffers[i];
+                DestroyStructure(ref blas, ref storage);
+            }
+
+            _blases.Clear();
+            _blasBuffers.Clear();
 
             _instanceBuffer?.Dispose();
             _instanceBuffer = null;
@@ -883,12 +1313,19 @@ namespace CSharp3D.Forms.Vulkan.RayTracing
             foreach (Image texture in _textures)
                 texture.Dispose();
 
+            for (int i = 0; i < 6; i++)
+            {
+                _skyImages[i]?.Dispose();
+                _skyImages[i] = null;
+            }
+
             _textures.Clear();
             _textureIndices.Clear();
 
             GeometryBuffer?.Dispose();
             MaterialBuffer?.Dispose();
             LightBuffer?.Dispose();
+            EmitterBuffer?.Dispose();
 
             if (Sampler.Handle != 0)
             {

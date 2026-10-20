@@ -1,0 +1,103 @@
+#version 460
+
+// Source 2013's bloom, over the tone-mapped 8-bit picture: what engine_post adds to the frame
+// buffer in gamma space at mat_bloomscale 1.
+//
+//   mode 0  downsample (downsample_nohdr): a quarter-resolution texel is the mean of its 4x4
+//           pixels of rgb^2.2 x dot(rgb, (0.3, 0.59, 0.11)) - bright pixels dominate
+//   mode 1  Gaussian blur along x, A -> B
+//   mode 2  Gaussian blur along y, B -> A
+//   mode 3  the frame += the blurred image (bilinear) x scale, clamped
+//
+// Measured on the lab rooms: scale 1 (not CS:GO's 0.5) and a blur of about 1.5% of the frame
+// height take the brightest floor from 106 to 120 where the game shows 124.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba8) uniform image2D ldr;
+layout(set = 0, binding = 1, rgba16f) uniform image2D bloomA;
+layout(set = 0, binding = 2, rgba16f) uniform image2D bloomB;
+
+layout(push_constant) uniform Push
+{
+    uint mode;
+    float sigma;    // the blur's standard deviation, in quarter-resolution texels
+    float scale;    // mat_bloomscale
+    float pad;
+} push;
+
+vec3 blurAlong(ivec2 q, ivec2 axis, ivec2 size, bool fromA)
+{
+    int radius = min(int(ceil(push.sigma * 3.0)), 48);
+    vec3 sum = vec3(0.0);
+    float weights = 0.0;
+
+    for (int i = -radius; i <= radius; i++)
+    {
+        float w = exp(-0.5 * (float(i) / push.sigma) * (float(i) / push.sigma));
+        ivec2 p = clamp(q + axis * i, ivec2(0), size - 1);
+        sum += (fromA ? imageLoad(bloomA, p).rgb : imageLoad(bloomB, p).rgb) * w;
+        weights += w;
+    }
+
+    return sum / weights;
+}
+
+void main()
+{
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 full = imageSize(ldr);
+    ivec2 quarter = imageSize(bloomA);
+
+    if (push.mode == 0u)
+    {
+        if (id.x >= quarter.x || id.y >= quarter.y)
+            return;
+
+        vec3 sum = vec3(0.0);
+
+        for (int y = 0; y < 4; y++)
+        {
+            for (int x = 0; x < 4; x++)
+            {
+                ivec2 p = min(id * 4 + ivec2(x, y), full - 1);
+                vec3 c = imageLoad(ldr, p).rgb;
+                sum += pow(c, vec3(2.2)) * dot(c, vec3(0.3, 0.59, 0.11));
+            }
+        }
+
+        imageStore(bloomA, id, vec4(sum / 16.0, 1.0));
+        return;
+    }
+
+    if (push.mode == 1u || push.mode == 2u)
+    {
+        if (id.x >= quarter.x || id.y >= quarter.y)
+            return;
+
+        if (push.mode == 1u)
+            imageStore(bloomB, id, vec4(blurAlong(id, ivec2(1, 0), quarter, true), 1.0));
+        else
+            imageStore(bloomA, id, vec4(blurAlong(id, ivec2(0, 1), quarter, false), 1.0));
+
+        return;
+    }
+
+    if (id.x >= full.x || id.y >= full.y)
+        return;
+
+    // Bilinear from the quarter-resolution image, texel centres at 4x + 1.5.
+    vec2 uv = (vec2(id) + 0.5) / 4.0 - 0.5;
+    ivec2 i0 = ivec2(floor(uv));
+    vec2 f = uv - vec2(i0);
+    ivec2 hi = quarter - 1;
+
+    vec3 a = imageLoad(bloomA, clamp(i0, ivec2(0), hi)).rgb;
+    vec3 b = imageLoad(bloomA, clamp(i0 + ivec2(1, 0), ivec2(0), hi)).rgb;
+    vec3 c = imageLoad(bloomA, clamp(i0 + ivec2(0, 1), ivec2(0), hi)).rgb;
+    vec3 d = imageLoad(bloomA, clamp(i0 + ivec2(1, 1), ivec2(0), hi)).rgb;
+    vec3 bloom = mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+
+    vec4 frame = imageLoad(ldr, id);
+    imageStore(ldr, id, vec4(clamp(frame.rgb + bloom * push.scale, 0.0, 1.0), frame.a));
+}
