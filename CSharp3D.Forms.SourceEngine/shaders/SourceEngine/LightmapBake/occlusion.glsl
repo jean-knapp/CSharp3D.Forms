@@ -1,7 +1,7 @@
 #version 430 core
 
 // Shadow-ray occlusion for the lightmap bake: one invocation per ray, answering the
-// same question RayBvh.AnyHit answers on the CPU — "is anything hit in (0, tmax)?".
+// same question RayBvh.AnyHit answers on the CPU - "is anything hit in (0, tmax)?".
 //
 // Deliberately ONLY the traversal. The light model (falloff curves, cone angles, colour,
 // clustering) stays in C#, because that is the part that has to match VRAD exactly and it
@@ -38,13 +38,20 @@ struct Ray
     vec4 modeFlags;   // x = mode (as int bits), y = ignoreFlags (as int bits), zw unused
 };
 
-/// Is anything hit at all? (IRayOracle.AnyHit — a shadow ray.)
+/// Is anything hit at all? (IRayOracle.AnyHit - a shadow ray.)
 const int MODE_ANY_HIT = 0;
 
 /// Does the ray reach the sky: nothing hit, or the CLOSEST hit is a sky face?
-/// (IRayOracle.ReachesSky — the sun and sky-dome integrals.) Needs the nearest hit
+/// (IRayOracle.ReachesSky - the sun and sky-dome integrals.) Needs the nearest hit
 /// rather than any hit, so it cannot share the early-out below.
 const int MODE_REACHES_SKY = 1;
+
+/// Which face is nearest, and how far? (RayBvh.ClosestHit - the bounce gather.) Answers the
+/// face id in hits[] and the distance in distances[]. A sky face or no hit at all answers
+/// NO_FACE, since the gather discards both the same way.
+const int MODE_CLOSEST_HIT = 2;
+
+const uint NO_FACE = 0xFFFFFFFFu;
 
 /// Mirrors RayTriangleFlags.Sky.
 const int FLAG_SKY = 1;
@@ -53,11 +60,12 @@ layout(std430, binding = 0) readonly  buffer NodeBuffer   { Node nodes[]; };
 layout(std430, binding = 1) readonly  buffer TriBuffer    { Tri  tris[];  };
 layout(std430, binding = 2) readonly  buffer RayBuffer    { Ray  rays[];  };
 layout(std430, binding = 3) writeonly buffer ResultBuffer { uint hits[];  };
+layout(std430, binding = 4) writeonly buffer DistanceBuffer { float distances[]; };
 
 uniform int uRayCount;
 
 /// Deep enough for a median-split BVH over any map this previews: the tree is balanced by
-/// construction, so depth is ceil(log2(tris/4)) — 64 covers 7e19 triangles. The CPU side
+/// construction, so depth is ceil(log2(tris/4)) - 64 covers 7e19 triangles. The CPU side
 /// grows its stack because it cannot know; here a fixed array keeps the whole thing in
 /// registers.
 const int STACK_SIZE = 64;
@@ -90,7 +98,7 @@ bool boxHit(vec3 bmin, vec3 bmax, vec3 origin, vec3 invDir, float tmax)
     return tmx >= max(tmin, 0.0) && tmin <= tmax;
 }
 
-/// Moller-Trumbore, two-sided — light is blocked from either side of a face.
+/// Moller-Trumbore, two-sided - light is blocked from either side of a face.
 bool triHit(vec3 a, vec3 b, vec3 c, vec3 origin, vec3 direction, float tmax, out float t)
 {
     t = 0.0;
@@ -144,19 +152,20 @@ void main()
 
     bool anyHit = false;
 
-    // Closest-hit state, only meaningful in MODE_REACHES_SKY. Shrinking the search
+    // Closest-hit state, only meaningful in MODE_REACHES_SKY and MODE_CLOSEST_HIT. Shrinking the search
     // distance as hits are found is what makes it converge on the nearest one, exactly as
     // RayBvh.ClosestHit does with hit.T.
     float nearestT = tmax;
     int nearestFlags = 0;
+    int nearestId = -1;
 
     while (sp > 0)
     {
         int nodeIndex = stack[--sp];
         Node node = nodes[nodeIndex];
 
-        // MODE_ANY_HIT never narrows, so it tests against the original tmax; the sky mode
-        // tests against the nearest hit so far and skips boxes entirely behind it.
+        // MODE_ANY_HIT never narrows, so it tests against the original tmax; the closest-hit
+        // modes test against the nearest hit so far and skips boxes entirely behind it.
         if (!boxHit(node.boundsMin.xyz, node.boundsMax.xyz, origin, invDir, nearestT))
             continue;
 
@@ -191,6 +200,7 @@ void main()
 
                 nearestT = t;
                 nearestFlags = floatBitsToInt(tri.v1.w);
+                nearestId = floatBitsToInt(tri.v0.w);
             }
 
             if (anyHit && mode == MODE_ANY_HIT)
@@ -203,7 +213,12 @@ void main()
         }
     }
 
-    if (mode == MODE_REACHES_SKY)
+    if (mode == MODE_CLOSEST_HIT)
+    {
+        hits[index] = (anyHit && (nearestFlags & FLAG_SKY) == 0) ? uint(nearestId) : NO_FACE;
+        distances[index] = nearestT;
+    }
+    else if (mode == MODE_REACHES_SKY)
     {
         // Nothing hit means the ray left the map, which vrad treats as sky (leaked-map
         // leniency); otherwise only a sky face counts.

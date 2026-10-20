@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using OpenTK.Graphics.OpenGL;
 
 namespace CSharp3D.Forms.SourceEngine.Lighting
@@ -39,6 +40,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         private int _triBuffer;
         private int _rayBuffer;
         private int _resultBuffer;
+        private int _distanceBuffer;
 
         private int _rayCapacity;
         private int _rayCountLocation;
@@ -75,7 +77,12 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             }
 
             int shader = GL.CreateShader(ShaderType.ComputeShader);
-            GL.ShaderSource(shader, source);
+
+            // NUL-terminated, not OpenTK's GL.ShaderSource(int, string): that overload passes
+            // the CHARACTER count as the byte length, so any multi-byte UTF-8 character in the
+            // file cut that many bytes off the end and the compile failed with "unexpected
+            // $end" (the same bug Shader.SetShaderSource fixes for the render shaders).
+            GL.ShaderSource(shader, 1, new[] { source }, (int[])null);
             GL.CompileShader(shader);
 
             int compiled;
@@ -114,6 +121,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             _triBuffer = GL.GenBuffer();
             _rayBuffer = GL.GenBuffer();
             _resultBuffer = GL.GenBuffer();
+            _distanceBuffer = GL.GenBuffer();
 
             return true;
         }
@@ -177,14 +185,32 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         // ==================== rays ====================
 
         /// <summary>
-        /// Trace <paramref name="count"/> rays and fill <paramref name="occluded"/> with
-        /// one flag each.
+        /// Trace <paramref name="count"/> rays starting at ray <paramref name="first"/> and
+        /// fill <paramref name="answers"/> from <paramref name="answerOffset"/> with one flag
+        /// each — so a caller can slice one staged batch across several dispatches.
         ///
-        /// <paramref name="rays"/> is the packed batch: eight floats per ray, laid out as
-        /// origin.xyz, tmax, direction.xyz, skipId-as-int-bits — the same order the shader
-        /// declares, so the upload is a straight memcpy with no per-ray marshalling.
+        /// <paramref name="rays"/> is the packed batch, <see cref="RayFloats"/> per ray in
+        /// the order the shader declares (see <see cref="PackRay"/>), so the upload is a
+        /// straight memcpy with no per-ray marshalling.
         /// </summary>
-        public bool Trace(float[] rays, int count, byte[] answers)
+        public bool Trace(float[] rays, int first, int count, byte[] answers, int answerOffset)
+        {
+            if (!BeginUpload(count))
+                return false;
+
+            GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero,
+                count * RayFloats * sizeof(float), ref rays[first * RayFloats]);
+
+            return TraceUploaded(count, answers, answerOffset);
+        }
+
+        /// <summary>
+        /// Make room for a dispatch of <paramref name="count"/> rays, to be filled with
+        /// <see cref="Upload"/> and traced with <see cref="TraceUploaded"/> — for a caller
+        /// whose rays are spread over several arrays, which can then go to the GPU without
+        /// first being copied into one.
+        /// </summary>
+        public bool BeginUpload(int count)
         {
             if (!IsUsable || count <= 0 || _uploaded == null)
                 return false;
@@ -192,40 +218,94 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             EnsureRayCapacity(count);
 
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _rayBuffer);
-            GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero,
+            return true;
+        }
+
+        /// <summary>Upload the first <paramref name="count"/> rays of an array to slot <paramref name="at"/>.</summary>
+        public void Upload(float[] rays, int count, int at)
+        {
+            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _rayBuffer);
+            GL.BufferSubData(BufferTarget.ShaderStorageBuffer, (IntPtr)((long)at * RayFloats * sizeof(float)),
                 count * RayFloats * sizeof(float), rays);
+        }
 
-            GL.UseProgram(_program);
-
-            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 0, _nodeBuffer);
-            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 1, _triBuffer);
-            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _rayBuffer);
-            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _resultBuffer);
-
-            GL.Uniform1(_rayCountLocation, count);
-
-            GL.DispatchCompute((count + WorkGroupSize - 1) / WorkGroupSize, 1, 1);
-
-            // The read below must see the writes, and only this barrier says so.
-            GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit);
+        /// <summary>Trace the <paramref name="count"/> rays uploaded since <see cref="BeginUpload"/>.</summary>
+        public bool TraceUploaded(int count, byte[] answers, int answerOffset)
+        {
+            Run(count);
 
             uint[] results = ResultScratch(count);
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _resultBuffer);
             GL.GetBufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero,
                 count * sizeof(uint), results);
 
-            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, 0);
-            GL.UseProgram(0);
-
-            // A dispatch that errored gives no useful answers, and treating whatever is in
-            // the buffer as visibility would bake wrong shadows silently. Say so instead.
-            if (GL.GetError() != ErrorCode.NoError)
+            if (!Finish())
                 return false;
 
             for (int i = 0; i < count; i++)
-                answers[i] = results[i] != 0 ? (byte)1 : (byte)0;
+                answers[answerOffset + i] = results[i] != 0 ? (byte)1 : (byte)0;
 
             return true;
+        }
+
+        /// <summary>
+        /// Trace <see cref="ModeClosestHit"/> rays, as <see cref="Trace"/> does, filling
+        /// <paramref name="faces"/> with the id of the nearest face each ray hits — -1 for a
+        /// sky face or no hit — and <paramref name="distances"/> with how far along it is.
+        /// </summary>
+        public bool TraceClosest(float[] rays, int first, int count, int[] faces, float[] distances,
+                                 int answerOffset)
+        {
+            if (!BeginUpload(count))
+                return false;
+
+            GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero,
+                count * RayFloats * sizeof(float), ref rays[first * RayFloats]);
+
+            Run(count);
+
+            // The shader's NO_FACE is all bits set, which reads back as -1 into an int.
+            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _resultBuffer);
+            GL.GetBufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero,
+                count * sizeof(int), ref faces[answerOffset]);
+
+            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _distanceBuffer);
+            GL.GetBufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero,
+                count * sizeof(float), ref distances[answerOffset]);
+
+            return Finish();
+        }
+
+        /// <summary>Run the kernel over the uploaded rays.</summary>
+        private void Run(int count)
+        {
+            GL.UseProgram(_program);
+
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 0, _nodeBuffer);
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 1, _triBuffer);
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _rayBuffer);
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _resultBuffer);
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 4, _distanceBuffer);
+
+            GL.Uniform1(_rayCountLocation, count);
+
+            GL.DispatchCompute((count + WorkGroupSize - 1) / WorkGroupSize, 1, 1);
+
+            // The reads that follow must see the writes, and only this barrier says so.
+            GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit);
+        }
+
+        /// <summary>
+        /// Unbind after the readback, and say whether the dispatch worked. One that errored
+        /// gives no useful answers, and treating whatever is in the buffers as visibility
+        /// would bake wrong shadows silently.
+        /// </summary>
+        private bool Finish()
+        {
+            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, 0);
+            GL.UseProgram(0);
+
+            return GL.GetError() == ErrorCode.NoError;
         }
 
         /// <summary>Reused readback staging — one batch per face, so this never shrinks.</summary>
@@ -251,6 +331,9 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// <summary>Answer "does it reach the sky" — <see cref="IRayOracle.ReachesSky"/>.</summary>
         public const int ModeReachesSky = 1;
 
+        /// <summary>Answer the nearest face and its distance — <see cref="RayBvh.ClosestHit"/>; see <see cref="TraceClosest"/>.</summary>
+        public const int ModeClosestHit = 2;
+
         /// <summary>Pack one ray into the layout <see cref="Trace"/> expects.</summary>
         public static void PackRay(float[] rays, int index, Vector3 origin, Vector3 direction,
             float tmax, int skipId, int mode, RayTriangleFlags ignoreFlags)
@@ -271,9 +354,22 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             rays[at + 11] = 0f;
         }
 
+        /// <summary>
+        /// The bits of an int as a float, without the byte array BitConverter would allocate
+        /// — this runs three times for every ray recorded.
+        /// </summary>
         private static float IntAsFloat(int value)
         {
-            return BitConverter.ToSingle(BitConverter.GetBytes(value), 0);
+            IntFloat bits = default(IntFloat);
+            bits.Int = value;
+            return bits.Float;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        private struct IntFloat
+        {
+            [FieldOffset(0)] public int Int;
+            [FieldOffset(0)] public float Float;
         }
 
         /// <summary>
@@ -299,6 +395,10 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             GL.BufferData(BufferTarget.ShaderStorageBuffer,
                 capacity * sizeof(uint), IntPtr.Zero, BufferUsageHint.StreamRead);
 
+            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _distanceBuffer);
+            GL.BufferData(BufferTarget.ShaderStorageBuffer,
+                capacity * sizeof(float), IntPtr.Zero, BufferUsageHint.StreamRead);
+
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, 0);
 
             _rayCapacity = capacity;
@@ -318,6 +418,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             DeleteBuffer(ref _triBuffer);
             DeleteBuffer(ref _rayBuffer);
             DeleteBuffer(ref _resultBuffer);
+            DeleteBuffer(ref _distanceBuffer);
 
             _uploaded = null;
             _rayCapacity = 0;

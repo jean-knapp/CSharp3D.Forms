@@ -5,11 +5,11 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 {
     /// <summary>
     /// Wires a <see cref="LightmapBaker"/> to the GPU: owns the bake context, the tracer and
-    /// the oracle, and answers the baker's per-face request for someone to trace its rays.
+    /// the oracle, and answers the baker's per-batch request for someone to trace its rays.
     ///
     /// Attach it and the bake uses the GPU where it can. Every failure mode — no 4.3, no
     /// second context, a shader that will not compile, a face too big for one batch, a
-    /// dispatch that errors — resolves to "that face traces on the CPU", so the worst case
+    /// dispatch that errors — resolves to "those luxels trace on the CPU", so the worst case
     /// is the speed the baker had before rather than a broken preview. That containment is
     /// the whole reason this is safe to attempt on unknown hardware.
     /// </summary>
@@ -24,6 +24,13 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
         /// <summary>Set once the worker has tried to start the GPU, either way.</summary>
         private volatile bool _resolved;
+
+        /// <summary>
+        /// The thread the bake context is current on — the only one that may touch it. Any
+        /// other caller gets no oracle (the CPU path) instead of a GL call without a context,
+        /// which is an access violation, not an exception anything could catch.
+        /// </summary>
+        private volatile int _contextThreadId = -1;
 
         private volatile string _failureReason;
 
@@ -67,10 +74,10 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
                 if (oracle == null)
                     return "cpu";
 
-                long declined = oracle.FacesDeclined;
+                long declined = oracle.SpansDeclined;
 
                 return declined > 0
-                    ? "gpu (" + declined + " faces on cpu)"
+                    ? "gpu (" + declined + " luxel spans on cpu)"
                     : "gpu";
             }
         }
@@ -111,6 +118,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             _context = context;
             _tracer = tracer;
             _oracle = new GpuBatchOracle(tracer, null);
+            _contextThreadId = Thread.CurrentThread.ManagedThreadId;
             _resolved = true;
         }
 
@@ -130,20 +138,24 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
             }
 
             _oracle = null;
+            _contextThreadId = -1;
         }
 
-        // ==================== per-face oracle ====================
+        // ==================== per-batch tracer ====================
 
         /// <summary>
-        /// The baker asking who should trace this face. Runs on the worker thread, with the
+        /// The baker asking who should trace this batch. Runs on the worker thread, with the
         /// bake context current.
         /// </summary>
-        private IRayOracle CreateOracle(RayBvh bvh)
+        private GpuBatchOracle CreateOracle(RayBvh bvh)
         {
             GpuRayTracer tracer = _tracer;
             GpuBatchOracle oracle = _oracle;
 
             if (tracer == null || oracle == null || bvh == null || bvh.TriangleCount == 0)
+                return null;
+
+            if (Thread.CurrentThread.ManagedThreadId != _contextThreadId)
                 return null;
 
             // Uploading is a no-op once the BVH is the one already there, so this is the
@@ -153,6 +165,7 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
 
             oracle.Fallback = new BvhRayOracle(bvh);
             oracle.ThrottleAfterDispatch = _interacting ? InteractingThrottleMs : 0;
+            oracle.MaxRaysPerDispatch = _interacting ? InteractingRaysPerDispatch : IdleRaysPerDispatch;
 
             return oracle;
         }
@@ -166,5 +179,15 @@ namespace CSharp3D.Forms.SourceEngine.Lighting
         /// someone is watching it move, which is the trade the adaptive budget is for.
         /// </summary>
         public int InteractingThrottleMs = 4;
+
+        /// <summary>
+        /// Rays per dispatch while the user is interacting. A pause between dispatches only
+        /// helps the viewport if the dispatches themselves are short: a frame that has to wait
+        /// for one to finish waits for all of it, however long the pause after.
+        /// </summary>
+        public int InteractingRaysPerDispatch = 128 * 1024;
+
+        /// <summary>Rays per dispatch otherwise — wide, so the per-dispatch cost is noise.</summary>
+        public int IdleRaysPerDispatch = 1024 * 1024;
     }
 }
