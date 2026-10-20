@@ -67,6 +67,160 @@ namespace CSharp3D.Forms.Engine
         public static void ForgetUniformLocations(object context)
         {
             _uniformLocations.Remove(context);
+            _uniformSets.Remove(context);
+
+            if (ReferenceEquals(_lastSetContext, context))
+            {
+                _lastSetContext = null;
+                _lastSet = null;
+            }
+        }
+
+        /// <summary>
+        /// The uniforms <see cref="Meshes.Mesh.DrawMesh"/> sets on every draw, resolved once per
+        /// program. Even cached, <see cref="GetUniformLocation"/> is three dictionary lookups (a
+        /// GraphicsContext key, then a string hash) and the draw path made two dozen of them per
+        /// mesh: on a map drawing thousands of meshes a frame that was a tenth of the frame. With
+        /// these, a draw costs one lookup - none at all when the program is the previous draw's.
+        ///
+        /// It also remembers which frame its per-frame uniforms (camera, lights, sun) were last
+        /// uploaded for, so they go up once per program per frame instead of once per mesh.
+        /// </summary>
+        public sealed class UniformSet
+        {
+            public readonly int Program;
+
+            public readonly int UseDiffuseTexture, UseBlendTexture, FaceShade, ShowNormals, FullBright,
+                TextureBrightness, UseNormalTexture, UseSpecularTexture, SpecularStrength, AddSelf,
+                OverbrightFactor, BaseColor, AlphaTestRef, LightPosition, LightColor, AmbientColor,
+                LightAttenuation, SunDirection, SunColor, CameraPosition, Projection, View, Model,
+                UseLightmap, UseAmbientCube, ViewportSize, DiffuseTexture, SpecularTexture,
+                NormalTexture, BlendTexture, LightmapTexture, LightmapMapU, LightmapMapV, LightmapInvSize,
+                LightmapFromVertex, LightmapBicubic, AmbientCube, LightmapRect, LightmapAtlas;
+
+            /// <summary>
+            /// The frame (<see cref="Meshes.Mesh.FrameStamp"/>) and inputs the per-frame uniforms
+            /// were last uploaded for; a different frame, scene or unlit state uploads them again.
+            /// </summary>
+            public long UploadedFrame = -1;
+            public object UploadedScene;
+            public bool UploadedUnlit;
+
+            /// <summary>Texture unit numbers are constant; set once per program.</summary>
+            public bool SamplersBound;
+
+            internal UniformSet(int program)
+            {
+                Program = program;
+
+                UseDiffuseTexture = GL.GetUniformLocation(program, "uUseDiffuseTexture");
+                UseBlendTexture = GL.GetUniformLocation(program, "uUseBlendTexture");
+                FaceShade = GL.GetUniformLocation(program, "uFaceShade");
+                ShowNormals = GL.GetUniformLocation(program, "uShowNormals");
+                FullBright = GL.GetUniformLocation(program, "uFullBright");
+                TextureBrightness = GL.GetUniformLocation(program, "uTextureBrightness");
+                UseNormalTexture = GL.GetUniformLocation(program, "uUseNormalTexture");
+                UseSpecularTexture = GL.GetUniformLocation(program, "uUseSpecularTexture");
+                SpecularStrength = GL.GetUniformLocation(program, "uSpecularStrength");
+                AddSelf = GL.GetUniformLocation(program, "uAddSelf");
+                OverbrightFactor = GL.GetUniformLocation(program, "uOverbrightFactor");
+                BaseColor = GL.GetUniformLocation(program, "uBaseColor");
+                AlphaTestRef = GL.GetUniformLocation(program, "uAlphaTestRef");
+                LightPosition = GL.GetUniformLocation(program, "uLightPosition");
+                LightColor = GL.GetUniformLocation(program, "uLightColor");
+                AmbientColor = GL.GetUniformLocation(program, "uAmbientColor");
+                LightAttenuation = GL.GetUniformLocation(program, "uLightAttenuation");
+                SunDirection = GL.GetUniformLocation(program, "uSunDirection");
+                SunColor = GL.GetUniformLocation(program, "uSunColor");
+                CameraPosition = GL.GetUniformLocation(program, "uCameraPosition");
+                Projection = GL.GetUniformLocation(program, "uProjection");
+                View = GL.GetUniformLocation(program, "uView");
+                Model = GL.GetUniformLocation(program, "uModel");
+                UseLightmap = GL.GetUniformLocation(program, "uUseLightmap");
+                UseAmbientCube = GL.GetUniformLocation(program, "uUseAmbientCube");
+                ViewportSize = GL.GetUniformLocation(program, "uViewportSize");
+                DiffuseTexture = GL.GetUniformLocation(program, "diffuseTexture");
+                SpecularTexture = GL.GetUniformLocation(program, "specularTexture");
+                NormalTexture = GL.GetUniformLocation(program, "normalTexture");
+                BlendTexture = GL.GetUniformLocation(program, "blendTexture");
+                LightmapTexture = GL.GetUniformLocation(program, "lightmapTexture");
+                LightmapMapU = GL.GetUniformLocation(program, "uLightmapMapU");
+                LightmapMapV = GL.GetUniformLocation(program, "uLightmapMapV");
+                LightmapInvSize = GL.GetUniformLocation(program, "uLightmapInvSize");
+                LightmapFromVertex = GL.GetUniformLocation(program, "uLightmapFromVertex");
+                LightmapBicubic = GL.GetUniformLocation(program, "uLightmapBicubic");
+                AmbientCube = GL.GetUniformLocation(program, "uAmbientCube");
+                LightmapRect = GL.GetUniformLocation(program, "uLightmapRect");
+                LightmapAtlas = GL.GetUniformLocation(program, "uLightmapAtlas");
+            }
+
+            /// <summary>
+            /// Forget what was uploaded: for code that sets this program's per-frame uniforms
+            /// itself, with values of its own.
+            /// </summary>
+            public void Invalidate()
+            {
+                UploadedFrame = -1;
+                UploadedScene = null;
+            }
+        }
+
+        private static readonly Dictionary<object, Dictionary<int, UniformSet>> _uniformSets =
+            new Dictionary<object, Dictionary<int, UniformSet>>();
+
+        // The previous lookup: consecutive draws almost always share a context and a program.
+        [ThreadStatic] private static object _lastSetContext;
+        [ThreadStatic] private static UniformSet _lastSet;
+
+        /// <summary>
+        /// The standard uniforms of <paramref name="shaderProgramId"/> in <paramref name="context"/>.
+        /// Must be called on the GL thread owning the context.
+        /// </summary>
+        public static UniformSet GetUniforms(object context, int shaderProgramId)
+        {
+            UniformSet last = _lastSet;
+
+            if (last != null && last.Program == shaderProgramId && ReferenceEquals(_lastSetContext, context))
+                return last;
+
+            Dictionary<int, UniformSet> byProgram;
+
+            if (!_uniformSets.TryGetValue(context, out byProgram))
+            {
+                byProgram = new Dictionary<int, UniformSet>();
+                _uniformSets[context] = byProgram;
+            }
+
+            UniformSet set;
+
+            if (!byProgram.TryGetValue(shaderProgramId, out set))
+            {
+                set = new UniformSet(shaderProgramId);
+                byProgram[shaderProgramId] = set;
+            }
+
+            _lastSetContext = context;
+            _lastSet = set;
+            return set;
+        }
+
+        /// <summary>
+        /// The program last bound through <see cref="Use"/> on this thread, and in which context;
+        /// 0 when unknown. Binding the program a mesh already finds bound is a driver call per
+        /// draw for nothing.
+        /// </summary>
+        [ThreadStatic] private static int _boundProgram;
+        [ThreadStatic] private static object _boundContext;
+
+        /// <summary>
+        /// Forget the bound program. Called by anything that binds programs behind
+        /// <see cref="Use"/>'s back - <see cref="Controls.RendererControl"/> before each frame's
+        /// meshes, after its sky pass.
+        /// </summary>
+        public static void ResetBoundProgram()
+        {
+            _boundProgram = 0;
+            _boundContext = null;
         }
 
         /// <summary>
@@ -237,7 +391,14 @@ namespace CSharp3D.Forms.Engine
         /// <param name="scene"> The scene. </param>
         public void Use(object context, Scene scene)
         {
-            GL.UseProgram(GetShaderId(context, scene));
+            int program = GetShaderId(context, scene);
+
+            if (program == _boundProgram && ReferenceEquals(context, _boundContext))
+                return;
+
+            GL.UseProgram(program);
+            _boundProgram = program;
+            _boundContext = context;
         }
     }
 }

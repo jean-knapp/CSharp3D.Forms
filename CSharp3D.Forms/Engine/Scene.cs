@@ -49,6 +49,15 @@ namespace CSharp3D.Forms.Engine
         public bool FullBright { get; set; } = false;
 
         /// <summary>
+        /// Multiplier on sampled albedo in the textured modes, 1 = as authored. Hammer's 3D
+        /// brightness (Ctrl+Home / Ctrl+End, mainfrm.cpp CMainFrame::SetBrightness: 0.1 to 5 in
+        /// steps of 0.2). Baked lightmaps are left alone: they carry real light already.
+        /// </summary>
+        [Category("Scene")]
+        [Description("Multiplier on sampled albedo in the textured modes; 1 = as authored.")]
+        public float TextureBrightness { get; set; } = 1f;
+
+        /// <summary>
         /// The constant color of the ambient light.
         /// </summary>
         [Category("Scene")]

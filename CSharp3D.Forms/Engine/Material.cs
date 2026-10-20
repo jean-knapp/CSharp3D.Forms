@@ -26,6 +26,15 @@ namespace CSharp3D.Forms.Engine
         public Texture Albedo { get; set; } = null;
 
         /// <summary>
+        /// A second albedo blended over <see cref="Albedo"/> by a mesh's per-vertex blend weight
+        /// (Source's WorldVertexTransition: $basetexture at weight 0, $basetexture2 at 1). Only a
+        /// mesh that carries blend weights - <see cref="Meshes.IndexedMesh.BlendWeights"/> - uses it.
+        /// </summary>
+        [Category("Basics")]
+        [Description("A second albedo blended in by the mesh's per-vertex blend weights.")]
+        public Texture Albedo2 { get; set; } = null;
+
+        /// <summary>
         /// The color to be applied on the material. White means no change.
         /// </summary>
         [Category("Adjustment")]
@@ -73,6 +82,22 @@ namespace CSharp3D.Forms.Engine
         [Category("Transparency")]
         [Description("If true, the material will be rendered additively (black is full transparent). The alpha channel is ignored.")]
         public bool Additive { get; set; } = false;
+
+        /// <summary>
+        /// If true, texels whose albedo alpha is below <see cref="AlphaTestReference"/> are discarded
+        /// (a cutout, Source's $alphatest). Unlike <see cref="Translucent"/> the mesh stays in the
+        /// opaque pass and writes depth, so fences and foliage sort correctly.
+        /// </summary>
+        [Category("Transparency")]
+        [Description("If true, texels whose albedo alpha is below AlphaTestReference are discarded (a cutout).")]
+        public bool AlphaTest { get; set; } = false;
+
+        /// <summary>
+        /// The alpha below which an <see cref="AlphaTest"/> material discards a texel, from 0.0 to 1.0.
+        /// </summary>
+        [Category("Transparency")]
+        [Description("The alpha below which an AlphaTest material discards a texel.")]
+        public float AlphaTestReference { get; set; } = 0.5f;
 
         /// <summary>
         /// If true, the material won't be affected by lights. The albedo texture or base color will be rendered at original colors.
@@ -145,6 +170,18 @@ namespace CSharp3D.Forms.Engine
             Shader = scene.GetShader(ShaderName);
             Shader.Use(context, scene);
 
+            // The sampler units never change, so they are set once per program.
+            Shader.UniformSet uniforms = Shader.GetUniforms(context, Shader.GetShaderId(context, scene));
+
+            if (!uniforms.SamplersBound)
+            {
+                if (uniforms.DiffuseTexture >= 0) GL.Uniform1(uniforms.DiffuseTexture, 0);
+                if (uniforms.SpecularTexture >= 0) GL.Uniform1(uniforms.SpecularTexture, 1);
+                if (uniforms.NormalTexture >= 0) GL.Uniform1(uniforms.NormalTexture, 2);
+                if (uniforms.BlendTexture >= 0) GL.Uniform1(uniforms.BlendTexture, 4);
+                uniforms.SamplersBound = true;
+            }
+
             //Texture albedoMap = rendererControl.Scene.GetTexture(AlbedoMapPath);
             Texture albedoMap = this.Albedo;
 
@@ -153,23 +190,28 @@ namespace CSharp3D.Forms.Engine
                 // Bind the texture
                 GL.ActiveTexture(TextureUnit.Texture0);
                 GL.BindTexture(TextureTarget.Texture2D, albedoMap.GetTextureId(context, scene));
-                GL.Uniform1(Shader.GetUniformLocation(context, Shader.GetShaderId(context, scene), "diffuseTexture"), 0);
             }
 
-            if (Specular != null && Specular.Bitmap != null) 
+            if (Specular != null && Specular.Bitmap != null)
             {
                 // Bind the texture
                 GL.ActiveTexture(TextureUnit.Texture1);
                 GL.BindTexture(TextureTarget.Texture2D, Specular.GetTextureId(context, scene));
-                GL.Uniform1(Shader.GetUniformLocation(context, Shader.GetShaderId(context, scene), "specularTexture"), 1);
             }
 
-            if (Normal != null && Normal.Bitmap != null) 
+            if (Normal != null && Normal.Bitmap != null)
             {
                 // Bind the texture
                 GL.ActiveTexture(TextureUnit.Texture2);
                 GL.BindTexture(TextureTarget.Texture2D, Normal.GetTextureId(context, scene));
-                GL.Uniform1(Shader.GetUniformLocation(context, Shader.GetShaderId(context, scene), "normalTexture"), 2);
+            }
+
+            // Unit 3 is the lightmap's (QuakeFaceMesh); the blend texture takes the next one.
+            if (Albedo2 != null && Albedo2.Bitmap != null)
+            {
+                GL.ActiveTexture(TextureUnit.Texture4);
+                GL.BindTexture(TextureTarget.Texture2D, Albedo2.GetTextureId(context, scene));
+                GL.ActiveTexture(TextureUnit.Texture0);
             }
 
             if (BackCulling)
