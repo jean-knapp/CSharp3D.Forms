@@ -40,6 +40,12 @@ namespace CSharp3D.Forms.Meshes
         public override float[] GetGLVertexArray()
         {
             int length = (int)Math.Max(Size / LineInterval, 2);
+
+            // The lines are laid out in pairs from -length/2 to length/2: an odd count would leave
+            // slots of the array unset (null vertices, which crashed the draw), so round it up.
+            if (length % 2 != 0)
+                length++;
+
             Vertices = new LocationVector[4 * (length + 1)];
 
             for (int i = -length / 2; i < length / 2; i += 2)

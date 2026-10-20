@@ -1,4 +1,4 @@
-namespace CSharp3D.Forms.Meshes
+﻿namespace CSharp3D.Forms.Meshes
 {
     /// <summary>
     /// How a mesh interacts with the depth buffer — a property of the MESH (unlike
@@ -22,7 +22,16 @@ namespace CSharp3D.Forms.Meshes
         /// The hidden-line half of a "solid where visible, dashed where hidden" selection overlay:
         /// draw the mesh once Normal and once OccludedOnly (dashed/dimmed) to get both.
         /// </summary>
-        OccludedOnly
+        OccludedOnly,
+
+        /// <summary>
+        /// Draw where the mesh is in front of OR exactly at the depth already there (LEQUAL),
+        /// writing no depth: a second coat over geometry that has already been drawn. Draw the
+        /// same surface again in this mode, after it, to recolour it - a selection tint over a
+        /// batched face - without the two fighting over the depth buffer. Must come after the
+        /// surface it covers.
+        /// </summary>
+        Coincident
     }
 
     /// <summary>
@@ -42,5 +51,11 @@ namespace CSharp3D.Forms.Meshes
 
         /// <summary> Skipped by views whose DrawMode is Wireframe (3D-only geometry). </summary>
         ExceptWireframeViews,
+
+        /// <summary>
+        /// Drawn by no view, while staying in the scene — a map's sky brushes while the sky itself
+        /// is being drawn behind them, which they would otherwise cover.
+        /// </summary>
+        None,
     }
 }

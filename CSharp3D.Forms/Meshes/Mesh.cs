@@ -1,4 +1,4 @@
-﻿using CSharp3D.Forms.Cameras;
+using CSharp3D.Forms.Cameras;
 using CSharp3D.Forms.Controls;
 using CSharp3D.Forms.Engine;
 using CSharp3D.Forms.Engine.Helpers;
@@ -108,10 +108,70 @@ namespace CSharp3D.Forms.Meshes
         public MeshDepthMode DepthMode { get; set; } = MeshDepthMode.Normal;
 
         /// <summary>
+        /// Polygon offset applied to the mesh's filled triangles (glPolygonOffset factor and
+        /// units both), 0 for none. Negative pulls the mesh toward the eye: what a decal or
+        /// overlay lying exactly on a face needs to win the depth test against it at every
+        /// distance, which no fixed world-space nudge does (Hammer's RENDER_POLYGON_OFFSET_FILL).
+        /// </summary>
+        [Category("Mesh")]
+        [Description("Polygon offset for coplanar surfaces such as decals; negative draws in front.")]
+        public float DepthBias { get; set; } = 0f;
+
+        /// <summary>
         /// Which views draw this mesh, judged by each view's <see cref="MeshDrawMode"/>
         /// (see <see cref="MeshViewFilter"/>). Default: every view.
         /// </summary>
         public MeshViewFilter ViewFilter { get; set; } = MeshViewFilter.All;
+
+        /// <summary>
+        /// Perspective views draw this mesh only while the camera is closer than this to
+        /// <see cref="DistanceOrigin"/> on every axis. 0 (the default) means no limit.
+        /// Paired with <see cref="MinCameraDistance"/> on a stand-in, this is an editor's
+        /// "detailed up close, a box far away" switch (Hammer's model render distance,
+        /// CMapStudioModel::Render3D, which tests the axes the same way). Orthographic views
+        /// have no meaningful camera distance and ignore both.
+        /// </summary>
+        [Browsable(false)]
+        public float MaxCameraDistance { get; set; }
+
+        /// <summary>
+        /// Perspective views draw this mesh only while the camera is at least this far from
+        /// <see cref="DistanceOrigin"/> on some axis - the exact complement of
+        /// <see cref="MaxCameraDistance"/> at the same value. 0 (the default) means no limit.
+        /// </summary>
+        [Browsable(false)]
+        public float MinCameraDistance { get; set; }
+
+        /// <summary>
+        /// The world point the camera distance limits are measured from; null measures from
+        /// <see cref="Location"/>.
+        /// </summary>
+        [Browsable(false)]
+        public LocationVector DistanceOrigin { get; set; }
+
+        /// <summary>
+        /// Whether a perspective camera at <paramref name="camera"/> (world units) is in the
+        /// range <see cref="MinCameraDistance"/>/<see cref="MaxCameraDistance"/> allow.
+        /// </summary>
+        public bool IsInCameraRange(LocationVector camera)
+        {
+            if (MaxCameraDistance <= 0f && MinCameraDistance <= 0f)
+                return true;
+
+            LocationVector origin = DistanceOrigin ?? Location;
+
+            float dx = Math.Abs(camera.X - origin.X);
+            float dy = Math.Abs(camera.Y - origin.Y);
+            float dz = Math.Abs(camera.Z - origin.Z);
+
+            bool near = MaxCameraDistance <= 0f
+                || (dx < MaxCameraDistance && dy < MaxCameraDistance && dz < MaxCameraDistance);
+
+            bool far = MinCameraDistance <= 0f
+                || !(dx < MinCameraDistance && dy < MinCameraDistance && dz < MinCameraDistance);
+
+            return near && far;
+        }
 
         /// <summary> Whether a view with the given draw mode should draw this mesh. </summary>
         public bool IsVisibleIn(MeshDrawMode viewDrawMode)
@@ -123,6 +183,9 @@ namespace CSharp3D.Forms.Meshes
 
                 case MeshViewFilter.ExceptWireframeViews:
                     return viewDrawMode != MeshDrawMode.Wireframe;
+
+                case MeshViewFilter.None:
+                    return false;
 
                 default:
                     return true;
@@ -302,6 +365,18 @@ namespace CSharp3D.Forms.Meshes
         /// <returns> The model matrix of the mesh. </returns>
         public virtual Matrix4 GetModelMatrix(Matrix4 viewMatrix)
         {
+            // Asked for twice per mesh per pane per frame (culling and drawing), and almost
+            // always for a mesh that has not moved: three quaternions and two matrix products
+            // each time added up. Location and Rotation are mutable, so the cache is keyed by
+            // their values, not by the objects.
+            LocationVector l = Location;
+            RotationVector r = Rotation;
+
+            if (_modelMatrixValid && l != null && r != null
+                && l.X == _cachedLX && l.Y == _cachedLY && l.Z == _cachedLZ
+                && r.Roll == _cachedRoll && r.Pitch == _cachedPitch && r.Yaw == _cachedYaw)
+                return _cachedModelMatrix;
+
             Vector3 location = VectorOrientation.ToGL(Location);
             Vector3 rotation = VectorOrientation.ToGL(Rotation) * MathHelper.Pi / 180f;
 
@@ -309,8 +384,19 @@ namespace CSharp3D.Forms.Meshes
             Quaternion qYaw = Quaternion.FromAxisAngle(Vector3.UnitY, rotation.Y);
             Quaternion qRoll = Quaternion.FromAxisAngle(Vector3.UnitZ, rotation.Z);
 
-            return Matrix4.CreateFromQuaternion(qYaw * qPitch * qRoll) * Matrix4.CreateTranslation(location);
+            Matrix4 model = Matrix4.CreateFromQuaternion(qYaw * qPitch * qRoll) * Matrix4.CreateTranslation(location);
+
+            _cachedLX = l.X; _cachedLY = l.Y; _cachedLZ = l.Z;
+            _cachedRoll = r.Roll; _cachedPitch = r.Pitch; _cachedYaw = r.Yaw;
+            _cachedModelMatrix = model;
+            _modelMatrixValid = true;
+
+            return model;
         }
+
+        private bool _modelMatrixValid;
+        private float _cachedLX, _cachedLY, _cachedLZ, _cachedRoll, _cachedPitch, _cachedYaw;
+        private Matrix4 _cachedModelMatrix;
 
         /// <summary>
         /// The contexts whose vertex buffers are stale. A mesh keeps one VBO per GL context (see
@@ -412,7 +498,7 @@ namespace CSharp3D.Forms.Meshes
 
             UpdateIndexBuffer(context);
 
-            ComputeBoundingBox(this);
+            ComputeBoundingBox(this, vertices);
         }
 
         /// <summary>
@@ -451,11 +537,11 @@ namespace CSharp3D.Forms.Meshes
             float[] vertices = GetGLVertexArray();
             uint[] indices = GetIndexArray();
 
-            ComputeBoundingBox(this);
+            ComputeBoundingBox(this, vertices);
 
-            vao[context] = GL.GenVertexArray();
-            vbo[context] = GL.GenBuffer();
-            ebo[context] = GL.GenBuffer();
+            vao[context] = NewVertexArray(context);
+            vbo[context] = NewBuffer(context);
+            ebo[context] = NewBuffer(context);
 
             GL.BindVertexArray(vao[context]);
 
@@ -489,6 +575,72 @@ namespace CSharp3D.Forms.Meshes
             MarkIndexBufferUploaded(context);
         }
 
+        // ---- GL object names, generated in bulk ----
+        //
+        // glGen* returns a value, so with a threaded driver (NVIDIA's default) every call waits
+        // for the driver thread to catch up. Uploading a large map's meshes asked for three
+        // names per mesh per view, one call each - a tenth of opening d1_canals_01 was spent
+        // in glGenVertexArrays alone. Names are now generated a block at a time per context;
+        // an unused name costs nothing until it is first bound.
+
+        private const int NameBlock = 256;
+
+        private static readonly Dictionary<object, Stack<int>> _freeVertexArrays = new Dictionary<object, Stack<int>>();
+        private static readonly Dictionary<object, Stack<int>> _freeBuffers = new Dictionary<object, Stack<int>>();
+
+        /// <summary>A fresh vertex array name in <paramref name="context"/>, which must be current.</summary>
+        protected static int NewVertexArray(object context)
+        {
+            return TakeName(_freeVertexArrays, context, true);
+        }
+
+        /// <summary>A fresh buffer name in <paramref name="context"/>, which must be current.</summary>
+        protected static int NewBuffer(object context)
+        {
+            return TakeName(_freeBuffers, context, false);
+        }
+
+        private static int TakeName(Dictionary<object, Stack<int>> pools, object context, bool vertexArrays)
+        {
+            Stack<int> pool;
+
+            lock (pools)
+            {
+                if (!pools.TryGetValue(context, out pool))
+                {
+                    pool = new Stack<int>();
+                    pools[context] = pool;
+                }
+
+                if (pool.Count == 0)
+                {
+                    int[] names = new int[NameBlock];
+
+                    if (vertexArrays)
+                        GL.GenVertexArrays(NameBlock, names);
+                    else
+                        GL.GenBuffers(NameBlock, names);
+
+                    for (int i = names.Length - 1; i >= 0; i--)
+                        pool.Push(names[i]);
+                }
+
+                return pool.Pop();
+            }
+        }
+
+        /// <summary>
+        /// Forget the spare names of a context that is going away (they go with it).
+        /// </summary>
+        public static void ForgetNamePools(object context)
+        {
+            lock (_freeVertexArrays)
+                _freeVertexArrays.Remove(context);
+
+            lock (_freeBuffers)
+                _freeBuffers.Remove(context);
+        }
+
         /// <summary>
         /// Check if the vertex data is loaded.
         /// </summary>
@@ -498,6 +650,12 @@ namespace CSharp3D.Forms.Meshes
         {
             return vao.ContainsKey(context);
         }
+
+        /// <summary>
+        /// Whether this mesh feeds the shader a per-vertex blend weight (vertex attribute 3),
+        /// which mixes <see cref="Material.Albedo"/> with <see cref="Material.Albedo2"/>.
+        /// </summary>
+        protected virtual bool HasBlendWeights => false;
 
         /// <summary>
         /// Draw the mesh.
@@ -534,204 +692,265 @@ namespace CSharp3D.Forms.Meshes
 
                 int shaderProgram = Material.Shader.GetShaderId(context, scene);
 
+                // Every location this draw sets, resolved once per program (Shader.UniformSet).
+                Shader.UniformSet u = Shader.GetUniforms(context, shaderProgram);
+
                 // Only the textured modes sample the albedo; solid and wireframe fall back to the
                 // material's flat colour, which is what makes them readable.
                 bool useAlbedo = (drawMode == MeshDrawMode.Textured || drawMode == MeshDrawMode.TexturedShaded)
                     && Material.Albedo != null && Material.Albedo.Bitmap != null;
 
-                int useDiffuseTextureLocation = Shader.GetUniformLocation(context, shaderProgram, "uUseDiffuseTexture");
-                GL.Uniform1(useDiffuseTextureLocation, useAlbedo ? 1 : 0);
+                GL.Uniform1(u.UseDiffuseTexture, useAlbedo ? 1 : 0);
+
+                // The two-texture vertex blend is on only for a mesh that carries blend weights
+                // and a material with a second albedo; set on every draw, so it never leaks.
+                if (u.UseBlendTexture >= 0)
+                    GL.Uniform1(u.UseBlendTexture, useAlbedo && HasBlendWeights
+                        && Material.Albedo2 != null && Material.Albedo2.Bitmap != null ? 1 : 0);
 
                 // Hammer's fixed-direction face shade (LightPlane, render3dms.cpp:154).
                 // It needs no scene lights, which is the point: it exists so geometry
                 // reads in an editor viewport, not to be physically meaningful.
                 bool shade = drawMode == MeshDrawMode.TexturedShaded || drawMode == MeshDrawMode.Solid;
 
-                int shadeLocation = Shader.GetUniformLocation(context, shaderProgram, "uFaceShade");
-                if (shadeLocation >= 0)
-                    GL.Uniform1(shadeLocation, shade ? 1 : 0);
+                if (u.FaceShade >= 0)
+                    GL.Uniform1(u.FaceShade, shade ? 1 : 0);
+
+                // Normal colouring is for surfaces; overlays drawn as lines or points share the
+                // program and must keep their colour, so it is set (and cleared) on every draw.
+                if (u.ShowNormals >= 0)
+                    GL.Uniform1(u.ShowNormals, drawMode == MeshDrawMode.Normals && PrimitiveType == PrimitiveType.Triangles ? 1 : 0);
 
                 // Editor viewports light nothing: the texture is the information, and the
                 // scene's lights would only darken it. Set per scene rather than derived
                 // from the draw mode, so a viewer that WANTS lit textured geometry keeps
                 // it (see Scene.FullBright).
-                int fullBrightLocation = Shader.GetUniformLocation(context, shaderProgram, "uFullBright");
-                if (fullBrightLocation >= 0)
-                    GL.Uniform1(fullBrightLocation, ForceFullBright || (scene != null && scene.FullBright) ? 1 : 0);
+                if (u.FullBright >= 0)
+                    GL.Uniform1(u.FullBright, ForceFullBright || (scene != null && scene.FullBright) ? 1 : 0);
 
-                int useNormalTextureLocation = Shader.GetUniformLocation(context, shaderProgram, "uUseNormalTexture");
-                GL.Uniform1(useNormalTextureLocation, Material.Normal != null && Material.Normal.Bitmap != null ? 1 : 0);
+                GL.Uniform1(u.UseNormalTexture, Material.Normal != null && Material.Normal.Bitmap != null ? 1 : 0);
+                GL.Uniform1(u.UseSpecularTexture, Material.Specular != null && Material.Specular.Bitmap != null ? 1 : 0);
+                GL.Uniform1(u.SpecularStrength, Material.SpecularStrength);
+                GL.Uniform1(u.AddSelf, Material.AddSelf);
+                GL.Uniform1(u.OverbrightFactor, Material.OverbrightFactor);
+                GL.Uniform4(u.BaseColor, Material.Color.R / 255f, Material.Color.G / 255f, Material.Color.B / 255f, Material.Alpha);
 
-                int useSpecularTextureLocation = Shader.GetUniformLocation(context, shaderProgram, "uUseSpecularTexture");
-                GL.Uniform1(useSpecularTextureLocation, Material.Specular != null && Material.Specular.Bitmap != null ? 1 : 0);
+                // Cutout threshold, 0 = off. Only meaningful while the albedo is sampled; set on
+                // every draw because the program is shared and the previous mesh's value would leak.
+                if (u.AlphaTestRef >= 0)
+                    GL.Uniform1(u.AlphaTestRef, Material.AlphaTest && useAlbedo ? System.Math.Max(Material.AlphaTestReference, 0.001f) : 0f);
 
-                int specularStrengthLocation = Shader.GetUniformLocation(context, shaderProgram, "uSpecularStrength");
-                GL.Uniform1(specularStrengthLocation, Material.SpecularStrength);
-
-                int addSelfLocation = Shader.GetUniformLocation(context, shaderProgram, "uAddSelf");
-                GL.Uniform1(addSelfLocation, Material.AddSelf);
-
-                int overbrightFactorLocation = Shader.GetUniformLocation(context, shaderProgram, "uOverbrightFactor");
-                GL.Uniform1(overbrightFactorLocation, Material.OverbrightFactor);
-
-                int colorLocation = Shader.GetUniformLocation(context, shaderProgram, "uBaseColor");
-                GL.Uniform4(colorLocation, new Vector4(Material.Color.R / 255f, Material.Color.G / 255f, Material.Color.B / 255f, Material.Alpha));
-
-                int lightPositionLocation = Shader.GetUniformLocation(context, shaderProgram, "uLightPosition");
-                int lightColorLocation = Shader.GetUniformLocation(context, shaderProgram, "uLightColor");
-                int ambientColorLocation = Shader.GetUniformLocation(context, shaderProgram, "uAmbientColor");
-                int lightAttenuationLocation = Shader.GetUniformLocation(context, shaderProgram, "uLightAttenuation");
-                // Scratch buffers reused across draws. These used to be four fresh arrays
-                // per mesh per frame per pane; on a large map that is tens of millions of
-                // allocations a second and the GC pressure alone stalls the editor.
-                float[] lightPositions = LightPositionScratch;
-                float[] lightColors = LightColorScratch;
-                float[] ambientColors = AmbientColorScratch;
-                float[] lightAttenuations = LightAttenuationScratch;
-
-                // Set up all lights
-                for (int i = 0; i < MAX_LIGHTS; i++)
+                // What is the same for every mesh of the frame - camera, matrices, lights, sun,
+                // brightness - goes up once per program per frame. The light arrays do depend
+                // on the material (an unlit one gets white), so a change of that re-uploads.
+                if (u.UploadedFrame != FrameStamp || !ReferenceEquals(u.UploadedScene, scene)
+                    || u.UploadedUnlit != Material.Unlit)
                 {
-                    int posIndex = i * 3;
-                    int colorIndex = i * 4;
-                    
-                    if (i < scene.Lights.Count)
-                    {
-                        // Light exists - use its properties
-                        PointLight pointLight = scene.Lights[i];
-                        Vector3 lightPos = VectorOrientation.ToGL(pointLight.Location);
-                        lightPositions[posIndex] = lightPos.X; 
-                        lightPositions[posIndex + 1] = lightPos.Y; 
-                        lightPositions[posIndex + 2] = lightPos.Z;
-                        
-                        Vector4 lightCol = Material.Unlit ? new Vector4(1, 1, 1, 0) : new Vector4(pointLight.Color.R / 255f, pointLight.Color.G / 255f, pointLight.Color.B / 255f, pointLight.Intensity);
-                        lightColors[colorIndex] = lightCol.X; 
-                        lightColors[colorIndex + 1] = lightCol.Y; 
-                        lightColors[colorIndex + 2] = lightCol.Z; 
-                        lightColors[colorIndex + 3] = lightCol.W;
-                        
-                        Vector4 ambientCol = Material.Unlit ? new Vector4(1, 1, 1, 1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity);
-                        ambientColors[colorIndex] = ambientCol.X; 
-                        ambientColors[colorIndex + 1] = ambientCol.Y; 
-                        ambientColors[colorIndex + 2] = ambientCol.Z; 
-                        ambientColors[colorIndex + 3] = ambientCol.W;
-                        
-                        Vector3 lightAtt = new Vector3(pointLight.Quadratic, pointLight.Linear, pointLight.Constant);
-                        lightAttenuations[posIndex] = lightAtt.X; 
-                        lightAttenuations[posIndex + 1] = lightAtt.Y; 
-                        lightAttenuations[posIndex + 2] = lightAtt.Z;
-                    }
-                    else
-                    {
-                        // Light doesn't exist - set to "off"
-                        lightPositions[posIndex] = 0.0f; 
-                        lightPositions[posIndex + 1] = 0.0f; 
-                        lightPositions[posIndex + 2] = 0.0f;
-                        
-                        lightColors[colorIndex] = 1.0f; 
-                        lightColors[colorIndex + 1] = 1.0f; 
-                        lightColors[colorIndex + 2] = 1.0f; 
-                        lightColors[colorIndex + 3] = 0.0f; // Intensity = 0 means off
-                        
-                        Vector4 ambientCol = Material.Unlit ? new Vector4(1, 1, 1, 1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity);
-                        ambientColors[colorIndex] = ambientCol.X; 
-                        ambientColors[colorIndex + 1] = ambientCol.Y; 
-                        ambientColors[colorIndex + 2] = ambientCol.Z; 
-                        ambientColors[colorIndex + 3] = ambientCol.W;
-                        
-                        lightAttenuations[posIndex] = 1.0f; 
-                        lightAttenuations[posIndex + 1] = 0.0f; 
-                        lightAttenuations[posIndex + 2] = 0.0f;
-                    }
+                    UploadFrameUniforms(u, scene, projection, view);
+                    u.UploadedFrame = FrameStamp;
+                    u.UploadedScene = scene;
+                    u.UploadedUnlit = Material.Unlit;
                 }
-
-                // The sun. A scene without one uploads intensity 0, which the shader reads
-                // as "no directional light" — so nothing changes for scenes that never set it.
-                int sunDirectionLocation = Shader.GetUniformLocation(context, shaderProgram, "uSunDirection");
-                int sunColorLocation = Shader.GetUniformLocation(context, shaderProgram, "uSunColor");
-
-                DirectionalLight sun = Material.Unlit ? null : scene.Sun;
-                if (sun != null && sun.Intensity > 0f)
-                {
-                    // Direction is authored in World units; the shader works in GL space.
-                    Vector3 sunDirection = VectorOrientation.ToGL(new LocationVector(
-                        sun.NormalizedDirection.X, sun.NormalizedDirection.Y, sun.NormalizedDirection.Z));
-
-                    GL.Uniform3(sunDirectionLocation, sunDirection);
-                    GL.Uniform4(sunColorLocation,
-                        new Vector4(sun.Color.R / 255f, sun.Color.G / 255f, sun.Color.B / 255f, sun.Intensity));
-                }
-                else
-                {
-                    GL.Uniform3(sunDirectionLocation, new Vector3(0, -1, 0));
-                    GL.Uniform4(sunColorLocation, new Vector4(1, 1, 1, 0));
-                }
-
-                // Send all uniform data
-                GL.Uniform3(lightPositionLocation, MAX_LIGHTS, lightPositions);
-                GL.Uniform4(lightColorLocation, MAX_LIGHTS, lightColors);
-                GL.Uniform4(ambientColorLocation, MAX_LIGHTS, ambientColors);
-                GL.Uniform3(lightAttenuationLocation, MAX_LIGHTS, lightAttenuations);
-
-                int cameraPositionLocation = Shader.GetUniformLocation(context, shaderProgram, "uCameraPosition");
-                var cameraLocation = Camera.GetLocation(view);
-                GL.Uniform3(cameraPositionLocation, VectorOrientation.ToGL(cameraLocation));
-
-                // Set the projection matrix
-                int projLoc = Shader.GetUniformLocation(context, shaderProgram, "uProjection");
-                GL.UniformMatrix4(projLoc, false, ref projection);
-
-                // Set the view matrix
-                int viewLoc = Shader.GetUniformLocation(context, shaderProgram, "uView");
-                GL.UniformMatrix4(viewLoc, false, ref view);
 
                 Matrix4 model = GetModelMatrix(view);
-                int modelLoc = Shader.GetUniformLocation(context, shaderProgram, "uModel");
-                GL.UniformMatrix4(modelLoc, false, ref model);
+                GL.UniformMatrix4(u.Model, false, ref model);
 
                 // Shader programs are shared between meshes, so per-mesh optional
                 // features must be reset every draw or the previous mesh's state leaks.
-                int useLightmapLocation = Shader.GetUniformLocation(context, shaderProgram, "uUseLightmap");
-                if (useLightmapLocation >= 0)
-                    GL.Uniform1(useLightmapLocation, 0);
+                if (u.UseLightmap >= 0)
+                    GL.Uniform1(u.UseLightmap, 0);
+
+                if (u.UseAmbientCube >= 0)
+                    GL.Uniform1(u.UseAmbientCube, 0);
 
                 // Subclass hook (e.g. QuakeFaceMesh's baked lightmap) — runs after all
                 // the standard uniforms, right before the draw call.
                 ApplyCustomUniforms(context, scene, shaderProgram, drawMode);
 
-                // Depth-mode override for tool overlays. Global GL state, so whatever was in effect
-                // is captured and restored right after the draw — the next mesh shares this state
-                // machine, and the renderer's translucent pass runs with the depth mask off.
-                bool priorDepthMask = false;
-                if (DepthMode == MeshDepthMode.Overlay)
-                {
-                    GL.Disable(EnableCap.DepthTest);
-                }
-                else if (DepthMode == MeshDepthMode.OccludedOnly)
-                {
-                    // Draw only where the mesh is BEHIND what is already there; keep depth writes
-                    // off so the pass cannot punch holes into the scene's occlusion.
-                    GL.GetBoolean(GetPName.DepthWritemask, out priorDepthMask);
-                    GL.DepthFunc(DepthFunction.Greater);
-                    GL.DepthMask(false);
-                }
-
-                GL.BindVertexArray(vao[context]);
-                GL.DrawElements(PrimitiveType, GetIndexCount(), DrawElementsType.UnsignedInt, 0);
-                GL.BindVertexArray(0);
-
-                if (DepthMode == MeshDepthMode.Overlay)
-                {
-                    GL.Enable(EnableCap.DepthTest);
-                }
-                else if (DepthMode == MeshDepthMode.OccludedOnly)
-                {
-                    GL.DepthFunc(DepthFunction.Less);
-                    GL.DepthMask(priorDepthMask);
-                }
+                DrawElementsWithDepthMode(context);
             } catch (AccessViolationException e)
             {
 
+            }
+        }
+
+        /// <summary>
+        /// Advanced once per frame by the renderer (<see cref="BeginFrame"/>). Per-frame
+        /// uniforms are uploaded to a program once per value of this.
+        /// </summary>
+        public static long FrameStamp { get; private set; }
+
+        /// <summary>The size of the viewport being drawn, for meshes that work in pixels.</summary>
+        [ThreadStatic] private static int _viewportWidth, _viewportHeight;
+
+        public static int ViewportWidth => _viewportWidth;
+
+        public static int ViewportHeight => _viewportHeight;
+
+        /// <summary>
+        /// Start a frame: per-frame uniforms are uploaded afresh, the viewport size is recorded
+        /// (so a mesh needing it does not have to query GL - a glGet stalls a threaded driver),
+        /// and the bound program is forgotten (the sky pass binds its own behind Shader.Use's back).
+        /// </summary>
+        public static void BeginFrame(int viewportWidth, int viewportHeight)
+        {
+            FrameStamp++;
+            _viewportWidth = viewportWidth;
+            _viewportHeight = viewportHeight;
+            Shader.ResetBoundProgram();
+        }
+
+        /// <summary>The uniforms shared by every mesh of a frame, into one program.</summary>
+        private void UploadFrameUniforms(Shader.UniformSet u, Scene scene, Matrix4 projection, Matrix4 view)
+        {
+            // Scene-wide texture brightness (Scene.TextureBrightness).
+            if (u.TextureBrightness >= 0)
+                GL.Uniform1(u.TextureBrightness, scene != null ? scene.TextureBrightness : 1f);
+
+            // Scratch buffers reused across draws. These used to be four fresh arrays
+            // per mesh per frame per pane; on a large map that is tens of millions of
+            // allocations a second and the GC pressure alone stalls the editor.
+            float[] lightPositions = LightPositionScratch;
+            float[] lightColors = LightColorScratch;
+            float[] ambientColors = AmbientColorScratch;
+            float[] lightAttenuations = LightAttenuationScratch;
+
+            // Set up all lights
+            for (int i = 0; i < MAX_LIGHTS; i++)
+            {
+                int posIndex = i * 3;
+                int colorIndex = i * 4;
+                
+                if (i < scene.Lights.Count)
+                {
+                    // Light exists - use its properties
+                    PointLight pointLight = scene.Lights[i];
+                    Vector3 lightPos = VectorOrientation.ToGL(pointLight.Location);
+                    lightPositions[posIndex] = lightPos.X; 
+                    lightPositions[posIndex + 1] = lightPos.Y; 
+                    lightPositions[posIndex + 2] = lightPos.Z;
+                    
+                    Vector4 lightCol = Material.Unlit ? new Vector4(1, 1, 1, 0) : new Vector4(pointLight.Color.R / 255f, pointLight.Color.G / 255f, pointLight.Color.B / 255f, pointLight.Intensity);
+                    lightColors[colorIndex] = lightCol.X; 
+                    lightColors[colorIndex + 1] = lightCol.Y; 
+                    lightColors[colorIndex + 2] = lightCol.Z; 
+                    lightColors[colorIndex + 3] = lightCol.W;
+                    
+                    Vector4 ambientCol = Material.Unlit ? new Vector4(1, 1, 1, 1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity);
+                    ambientColors[colorIndex] = ambientCol.X; 
+                    ambientColors[colorIndex + 1] = ambientCol.Y; 
+                    ambientColors[colorIndex + 2] = ambientCol.Z; 
+                    ambientColors[colorIndex + 3] = ambientCol.W;
+                    
+                    Vector3 lightAtt = new Vector3(pointLight.Quadratic, pointLight.Linear, pointLight.Constant);
+                    lightAttenuations[posIndex] = lightAtt.X; 
+                    lightAttenuations[posIndex + 1] = lightAtt.Y; 
+                    lightAttenuations[posIndex + 2] = lightAtt.Z;
+                }
+                else
+                {
+                    // Light doesn't exist - set to "off"
+                    lightPositions[posIndex] = 0.0f; 
+                    lightPositions[posIndex + 1] = 0.0f; 
+                    lightPositions[posIndex + 2] = 0.0f;
+                    
+                    lightColors[colorIndex] = 1.0f; 
+                    lightColors[colorIndex + 1] = 1.0f; 
+                    lightColors[colorIndex + 2] = 1.0f; 
+                    lightColors[colorIndex + 3] = 0.0f; // Intensity = 0 means off
+                    
+                    Vector4 ambientCol = Material.Unlit ? new Vector4(1, 1, 1, 1) : new Vector4(scene.AmbientColor.R / 255f, scene.AmbientColor.G / 255f, scene.AmbientColor.B / 255f, scene.AmbientIntensity);
+                    ambientColors[colorIndex] = ambientCol.X; 
+                    ambientColors[colorIndex + 1] = ambientCol.Y; 
+                    ambientColors[colorIndex + 2] = ambientCol.Z; 
+                    ambientColors[colorIndex + 3] = ambientCol.W;
+                    
+                    lightAttenuations[posIndex] = 1.0f; 
+                    lightAttenuations[posIndex + 1] = 0.0f; 
+                    lightAttenuations[posIndex + 2] = 0.0f;
+                }
+            }
+
+            // The sun. A scene without one uploads intensity 0, which the shader reads
+            // as "no directional light" — so nothing changes for scenes that never set it.
+            DirectionalLight sun = Material.Unlit ? null : scene.Sun;
+            if (sun != null && sun.Intensity > 0f)
+            {
+                // Direction is authored in World units; the shader works in GL space.
+                Vector3 sunDirection = VectorOrientation.ToGL(new LocationVector(
+                    sun.NormalizedDirection.X, sun.NormalizedDirection.Y, sun.NormalizedDirection.Z));
+
+                GL.Uniform3(u.SunDirection, sunDirection);
+                GL.Uniform4(u.SunColor,
+                    new Vector4(sun.Color.R / 255f, sun.Color.G / 255f, sun.Color.B / 255f, sun.Intensity));
+            }
+            else
+            {
+                GL.Uniform3(u.SunDirection, new Vector3(0, -1, 0));
+                GL.Uniform4(u.SunColor, new Vector4(1, 1, 1, 0));
+            }
+
+            // Send all uniform data
+            GL.Uniform3(u.LightPosition, MAX_LIGHTS, lightPositions);
+            GL.Uniform4(u.LightColor, MAX_LIGHTS, lightColors);
+            GL.Uniform4(u.AmbientColor, MAX_LIGHTS, ambientColors);
+            GL.Uniform3(u.LightAttenuation, MAX_LIGHTS, lightAttenuations);
+
+            var cameraLocation = Camera.GetLocation(view);
+            GL.Uniform3(u.CameraPosition, VectorOrientation.ToGL(cameraLocation));
+
+            GL.UniformMatrix4(u.Projection, false, ref projection);
+            GL.UniformMatrix4(u.View, false, ref view);
+        }
+
+        /// <summary>The draw call itself, with <see cref="DepthMode"/> and <see cref="DepthBias"/> applied around it.</summary>
+        private void DrawElementsWithDepthMode(object context)
+        {
+            // Depth-mode override for tool overlays. Global GL state, so whatever was in effect
+            // is captured and restored right after the draw — the next mesh shares this state
+            // machine, and the renderer's translucent pass runs with the depth mask off.
+            bool priorDepthMask = false;
+            if (DepthMode == MeshDepthMode.Overlay)
+            {
+                GL.Disable(EnableCap.DepthTest);
+            }
+            else if (DepthMode == MeshDepthMode.OccludedOnly)
+            {
+                // Draw only where the mesh is BEHIND what is already there; keep depth writes
+                // off so the pass cannot punch holes into the scene's occlusion.
+                GL.GetBoolean(GetPName.DepthWritemask, out priorDepthMask);
+                GL.DepthFunc(DepthFunction.Greater);
+                GL.DepthMask(false);
+            }
+            else if (DepthMode == MeshDepthMode.Coincident)
+            {
+                // Same surface again: equal depth must pass, and nothing is written.
+                GL.GetBoolean(GetPName.DepthWritemask, out priorDepthMask);
+                GL.DepthFunc(DepthFunction.Lequal);
+                GL.DepthMask(false);
+            }
+
+            if (DepthBias != 0f)
+            {
+                GL.Enable(EnableCap.PolygonOffsetFill);
+                GL.PolygonOffset(DepthBias, DepthBias);
+            }
+
+            GL.BindVertexArray(vao[context]);
+            GL.DrawElements(PrimitiveType, GetIndexCount(), DrawElementsType.UnsignedInt, 0);
+            GL.BindVertexArray(0);
+
+            if (DepthBias != 0f)
+                GL.Disable(EnableCap.PolygonOffsetFill);
+
+            if (DepthMode == MeshDepthMode.Overlay)
+            {
+                GL.Enable(EnableCap.DepthTest);
+            }
+            else if (DepthMode == MeshDepthMode.OccludedOnly || DepthMode == MeshDepthMode.Coincident)
+            {
+                GL.DepthFunc(DepthFunction.Less);
+                GL.DepthMask(priorDepthMask);
             }
         }
 
@@ -851,9 +1070,8 @@ namespace CSharp3D.Forms.Meshes
             worldBoxMax = max;
         }
 
-        private void ComputeBoundingBox(Mesh mesh)
+        private void ComputeBoundingBox(Mesh mesh, float[] vertices)
         {
-            float[] vertices = mesh.GetGLVertexArray();
             // Typically, each vertex has (posX, posY, posZ, normalX, normalY, normalZ, texU, texV)
             // so that's 8 floats per vertex. The positions are at indices [0,1,2].
             // 

@@ -18,7 +18,15 @@ namespace CSharp3D.Forms.Meshes
         /// face, not by mesh.
         /// </summary>
         [Browsable(false)]
-        public LightmapTexture Lightmap { get; set; }
+        public ILightmapTexture Lightmap { get; set; }
+
+        /// <summary>
+        /// Where this face's lightmap sits in <see cref="Lightmap"/>, in texels (a slot of a
+        /// <see cref="LightmapAtlas"/>). Empty means the whole texture, at
+        /// <see cref="LightmapWidth"/> x <see cref="LightmapHeight"/>.
+        /// </summary>
+        [Browsable(false)]
+        public LightmapRect LightmapRect { get; set; }
 
         /// <summary>
         /// Lightmap UV mapping, world space: u_luxel = dot(P, LightmapAxisU) + LightmapOffsetU
@@ -50,28 +58,81 @@ namespace CSharp3D.Forms.Meshes
         /// </summary>
         protected override void ApplyCustomUniforms(object context, Scene scene, int shaderProgram, MeshDrawMode drawMode)
         {
-            if (Lightmap == null || drawMode != MeshDrawMode.Textured || LightmapWidth <= 0 || LightmapHeight <= 0)
+            if (drawMode != MeshDrawMode.Textured)
                 return;
 
-            int textureId = Lightmap.GetTextureId(context);
+            BindLightmap(context, shaderProgram, Lightmap, LightmapAxisU, LightmapAxisV,
+                         LightmapOffsetU, LightmapOffsetV, LightmapRect, LightmapWidth, LightmapHeight, fromVertex: false);
+        }
+
+        /// <summary>
+        /// Smooth baked lightmaps with a bicubic B-spline instead of bilinear filtering — the
+        /// editor-side counterpart of Source's <c>r_lightmap_bicubic</c> (Hammer++'s
+        /// "LightmapBicubic" option). Read at draw time by every lightmapped mesh.
+        /// </summary>
+        public static bool LightmapBicubic { get; set; } = true;
+
+        /// <summary>
+        /// Bind one baked lightmap for the current draw: texture unit 3, the world→luxel
+        /// mapping and the size. Shared by brush faces and displacements, which differ only
+        /// in which position the shader maps: the fragment's own (a planar face), or the
+        /// undisplaced lattice position carried per vertex (<paramref name="fromVertex"/>).
+        /// Returns false — leaving the lightmap off — when there is nothing to bind.
+        /// </summary>
+        internal static bool BindLightmap(object context, int shaderProgram, ILightmapTexture lightmap,
+                                          Vector3 axisU, Vector3 axisV, float offsetU, float offsetV,
+                                          LightmapRect rect, float width, float height, bool fromVertex)
+        {
+            if (lightmap == null)
+                return false;
+
+            // No slot: the lightmap is the whole texture.
+            if (rect.IsEmpty)
+                rect = new LightmapRect { Width = (int)width, Height = (int)height };
+
+            if (rect.IsEmpty)
+                return false;
+
+            int textureId = lightmap.GetTextureId(context);
             if (textureId == 0)
-                return;
+                return false;
+
+            int textureWidth = lightmap.Width, textureHeight = lightmap.Height;
+            if (textureWidth <= 0 || textureHeight <= 0)
+                return false;
+
+            Shader.UniformSet u = Shader.GetUniforms(context, shaderProgram);
 
             GL.ActiveTexture(TextureUnit.Texture3);
             GL.BindTexture(TextureTarget.Texture2D, textureId);
-            GL.Uniform1(Shader.GetUniformLocation(context, shaderProgram, "lightmapTexture"), 3);
+            GL.Uniform1(u.LightmapTexture, 3);
             GL.ActiveTexture(TextureUnit.Texture0);
 
             // world (x,y,z) → GL (-y, z, -x); dot products are preserved under this
             // permutation, so converting the axis vector is all that's needed.
-            GL.Uniform4(Shader.GetUniformLocation(context, shaderProgram, "uLightmapMapU"),
-                -LightmapAxisU.Y, LightmapAxisU.Z, -LightmapAxisU.X, LightmapOffsetU);
-            GL.Uniform4(Shader.GetUniformLocation(context, shaderProgram, "uLightmapMapV"),
-                -LightmapAxisV.Y, LightmapAxisV.Z, -LightmapAxisV.X, LightmapOffsetV);
-            GL.Uniform2(Shader.GetUniformLocation(context, shaderProgram, "uLightmapInvSize"),
-                1.0f / LightmapWidth, 1.0f / LightmapHeight);
+            // A slot laid on its side holds luxel (s, t) at texel (t, s): map U onto the
+            // texture's rows and V across them.
+            if (rect.Rotated)
+            {
+                Vector3 axis = axisU;
+                axisU = axisV;
+                axisV = axis;
 
-            GL.Uniform1(Shader.GetUniformLocation(context, shaderProgram, "uUseLightmap"), 1);
+                float offset = offsetU;
+                offsetU = offsetV;
+                offsetV = offset;
+            }
+
+            GL.Uniform4(u.LightmapMapU, -axisU.Y, axisU.Z, -axisU.X, offsetU);
+            GL.Uniform4(u.LightmapMapV, -axisV.Y, axisV.Z, -axisV.X, offsetV);
+            GL.Uniform2(u.LightmapInvSize, 1.0f / textureWidth, 1.0f / textureHeight);
+            GL.Uniform4(u.LightmapRect, (float)rect.X, (float)rect.Y, (float)rect.Width, (float)rect.Height);
+            GL.Uniform1(u.LightmapAtlas, 0);
+
+            GL.Uniform1(u.LightmapFromVertex, fromVertex ? 1 : 0);
+            GL.Uniform1(u.LightmapBicubic, LightmapBicubic ? 1 : 0);
+            GL.Uniform1(u.UseLightmap, 1);
+            return true;
         }
 
         /// <summary>

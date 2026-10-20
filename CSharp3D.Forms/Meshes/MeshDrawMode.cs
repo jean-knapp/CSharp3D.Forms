@@ -25,6 +25,13 @@ namespace CSharp3D.Forms.Meshes
         /// <c>0.65 + 0.35 * dot(N, normalize(1,2,3))</c>, i.e. a constant world-space
         /// direction and a floor of 0.30 so nothing goes black.
         /// </summary>
-        TexturedShaded
+        TexturedShaded,
+
+        /// <summary>
+        /// Each surface coloured by its normal in Source axes (X red, Y green, Z blue, mapped from
+        /// [-1, 1] to [0, 1]) — the model viewer's way to check smoothing and flipped faces.
+        /// Lines and points keep their own colour.
+        /// </summary>
+        Normals
     }
 }

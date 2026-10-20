@@ -1,5 +1,6 @@
 using CSharp3D.Forms.Engine;
 using OpenTK;
+using OpenTK.Graphics.OpenGL;
 using System.ComponentModel;
 
 namespace CSharp3D.Forms.Meshes
@@ -33,6 +34,59 @@ namespace CSharp3D.Forms.Meshes
 
         /// <summary> Triangle indices into the vertex arrays. </summary>
         public uint[] Indices { get; set; } = { };
+
+        /// <summary>
+        /// Optional per-vertex blend weights, 0..1, parallel to Positions: how much of
+        /// <see cref="Material.Albedo2"/> shows over <see cref="Material.Albedo"/> (a Source
+        /// displacement's painted alpha on a WorldVertexTransition material). Null for none.
+        ///
+        /// They ride in the same vertex buffer, after the standard 8-float block rather than
+        /// inside it, so <see cref="GetGLVertexArray"/> keeps the layout every other reader of
+        /// it (bounds, ray tracing) assumes.
+        /// </summary>
+        public float[] BlendWeights { get; set; }
+
+        protected override bool HasBlendWeights => BlendWeights != null && BlendWeights.Length == Positions.Length;
+
+        public override void SetupMesh(object context)
+        {
+            base.SetupMesh(context);
+
+            if (HasBlendWeights)
+                UploadWithBlendWeights(context);
+        }
+
+        protected override void UpdateVertexBuffer(object context)
+        {
+            base.UpdateVertexBuffer(context);
+
+            if (HasBlendWeights)
+                UploadWithBlendWeights(context);
+        }
+
+        /// <summary>
+        /// Re-upload the vertex buffer as the 8-float block followed by one weight per vertex,
+        /// and point attribute 3 at the weights. The VAO keeps attributes 0-2 as the base class
+        /// set them; their offsets into the block do not move.
+        /// </summary>
+        private void UploadWithBlendWeights(object context)
+        {
+            if (!vbo.ContainsKey(context) || !vao.ContainsKey(context))
+                return;
+
+            float[] block = GetGLVertexArray();
+            float[] data = new float[block.Length + BlendWeights.Length];
+            System.Array.Copy(block, data, block.Length);
+            System.Array.Copy(BlendWeights, 0, data, block.Length, BlendWeights.Length);
+
+            GL.BindVertexArray(vao[context]);
+            GL.BindBuffer(BufferTarget.ArrayBuffer, vbo[context]);
+            GL.BufferData(BufferTarget.ArrayBuffer, data.Length * sizeof(float), data, BufferUsageHint.StaticDraw);
+            GL.VertexAttribPointer(3, 1, VertexAttribPointerType.Float, false, sizeof(float), block.Length * sizeof(float));
+            GL.EnableVertexAttribArray(3);
+            GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
+            GL.BindVertexArray(0);
+        }
 
         private float[] _glVertexCache;
         private uint[] _indexCache;

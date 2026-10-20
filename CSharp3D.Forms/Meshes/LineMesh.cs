@@ -54,6 +54,29 @@ namespace CSharp3D.Forms.Meshes
         [Browsable(false)]
         public int StippleFactor { get; set; } = 2;
 
+        /// <summary>
+        /// Optional, one per vertex: an offset in pixels (X right, Y up; Z unused) applied after
+        /// projection, so the vertices it moves draw at the same on-screen size at every zoom.
+        /// It is how a mesh carries editor handles - Hammer's centre X on every brush in a 2D view
+        /// (mapsolid.cpp Render2D) - beside the geometry they belong to, sharing its colour and
+        /// its selection tint. A vertex with a zero offset is an ordinary line vertex. Handles
+        /// are drawn only in orthographic views, and only while <see cref="ScreenExtents"/> is at
+        /// least twice the handle's size on screen. Null (the default) means no handles at all.
+        /// </summary>
+        [Browsable(false)]
+        public LocationVector[] ScreenOffsets { get; set; }
+
+        /// <summary>
+        /// One per vertex alongside <see cref="ScreenOffsets"/>: the world-space size of the shape
+        /// a handle vertex marks. A handle whose shape projects smaller than the handle is not
+        /// drawn - a cross bigger than the brush it marks would hide the brush.
+        /// </summary>
+        [Browsable(false)]
+        public LocationVector[] ScreenExtents { get; set; }
+
+        /// <summary>The viewport query's buffer; draws happen on the GL thread only.</summary>
+        private static readonly int[] viewport = new int[4];
+
         public LineMesh() : base()
         {
             Material = new Engine.Material();
@@ -96,6 +119,35 @@ namespace CSharp3D.Forms.Meshes
         }
 
         /// <summary>
+        /// Screen offsets are in pixels, so the shader needs the viewport to turn them into clip
+        /// space. Set on the program the base draw has just bound, from the size the renderer
+        /// recorded for this frame (Mesh.BeginFrame) - asking GL for it (glGetIntegerv) on every
+        /// draw stalls a threaded driver.
+        /// </summary>
+        protected override void ApplyCustomUniforms(object context, Scene scene, int shaderProgram, MeshDrawMode drawMode)
+        {
+            if (ScreenOffsets == null)
+                return;
+
+            int location = Shader.GetUniforms(context, shaderProgram).ViewportSize;
+
+            if (location < 0)
+                return;
+
+            int width = ViewportWidth, height = ViewportHeight;
+
+            // Drawn outside a renderer frame: ask GL after all.
+            if (width <= 0 || height <= 0)
+            {
+                GL.GetInteger(GetPName.Viewport, viewport);
+                width = viewport[2];
+                height = viewport[3];
+            }
+
+            GL.Uniform2(location, (float)width, (float)height);
+        }
+
+        /// <summary>
         /// Get the vertex array of the mesh.
         /// </summary>
         /// <returns> The vertex array of the mesh. </returns>
@@ -117,6 +169,23 @@ namespace CSharp3D.Forms.Meshes
                 result[i * 8 + 5] = 0;
                 result[i * 8 + 6] = 0;
                 result[i * 8 + 7] = 0;
+
+                // A handle vertex: its pixel offset in the normal's xy, and the extents of the
+                // shape it marks in the remaining slots, in the same (-y, z, -x) GL order as the
+                // position (signs dropped - they are sizes).
+                if (ScreenOffsets != null && i < ScreenOffsets.Length
+                    && (ScreenOffsets[i].X != 0 || ScreenOffsets[i].Y != 0))
+                {
+                    LocationVector extents = ScreenExtents != null && i < ScreenExtents.Length
+                        ? ScreenExtents[i]
+                        : new LocationVector(0, 0, 0);
+
+                    result[i * 8 + 3] = ScreenOffsets[i].X;
+                    result[i * 8 + 4] = ScreenOffsets[i].Y;
+                    result[i * 8 + 5] = System.Math.Abs(extents.X);
+                    result[i * 8 + 6] = System.Math.Abs(extents.Y);
+                    result[i * 8 + 7] = System.Math.Abs(extents.Z);
+                }
             }
 
             return result;
@@ -126,6 +195,16 @@ namespace CSharp3D.Forms.Meshes
         /// Get the index array of the mesh.
         /// </summary>
         /// <returns> The index array of the mesh. </returns>
+        /// <summary>
+        /// One index per vertex - counted, not built. The draw path asks for this on every
+        /// draw, and the base falls back to building the array: an allocation per outline per
+        /// pane per frame, thousands of them on a real map.
+        /// </summary>
+        public override int GetIndexCount()
+        {
+            return Vertices != null ? Vertices.Length : 0;
+        }
+
         public override uint[] GetIndexArray()
         {
             // Cuboid indices
