@@ -46,6 +46,37 @@ namespace CSharp3D.Forms.Cameras
 
         public bool MouseLook { get; set; } = false;
 
+        /// <summary>
+        /// Turn button-free mouselook on or off — Hammer's Z key (mapview3d.cpp OnKeyDown /
+        /// EnableMouseLook): while it is on, moving the mouse turns the camera with no button
+        /// held, the cursor hidden and pinned to the view's centre.
+        ///
+        /// Turning it on measures from where the cursor is now, so the view does not jump by
+        /// however far the cursor sat from the centre; turning it off bakes the look into
+        /// <see cref="Rotation"/>, the same thing releasing a held look button does.
+        /// </summary>
+        public void SetMouseLook(RendererControl rendererControl, bool enabled)
+        {
+            if (enabled == MouseLook || rendererControl == null)
+                return;
+
+            if (enabled)
+            {
+                Cursor.Position = rendererControl.GetCenterPointInScreen();
+                MouseInitialLocationReference = new Vector2(Cursor.Position.X, Cursor.Position.Y);
+                MouseLook = true;
+                Cursor.Hide();
+            }
+            else
+            {
+                Rotation = GetRotation(rendererControl);
+                MouseLook = false;
+                Cursor.Show();
+            }
+
+            rendererControl.Invalidate();
+        }
+
         public FreeLookCamera()
         {
         }

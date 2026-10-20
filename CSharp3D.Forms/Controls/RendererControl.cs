@@ -77,6 +77,15 @@ namespace CSharp3D.Forms.Controls
         public List<Mesh> ViewMeshes { get; } = new List<Mesh>();
 
         /// <summary>
+        /// A sky drawn behind everything this view draws, in place of the clear colour. Null, or
+        /// disabled, leaves the background as it was. Never shaded by the draw mode: the sky is
+        /// its own light.
+        /// </summary>
+        [Browsable(false)]
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+        public SkyboxPass Skybox { get; set; }
+
+        /// <summary>
         /// Per-view meshes drawn AFTER the scene, so they can be depth-tested against it or drawn
         /// over it.
         ///
@@ -118,7 +127,7 @@ namespace CSharp3D.Forms.Controls
         /// </summary>
         [Category("Graphics")]
         [Description("Specifies the number of samples for Full-Screen Anti-Aliasing (FSAA), also known as multisampling. Higher values provide better antialiasing but may impact performance.")]
-        private int Samples { get; set; } = 16;
+        private int Samples { get; set; } = 4;
 
         /// <summary>
         /// Specifies the number of buffers. Typically, this is set to true for double buffering, which reduces flickering and provides smoother rendering by alternating between two buffers.
@@ -128,10 +137,26 @@ namespace CSharp3D.Forms.Controls
         private bool DoubleBuffer { get; set; } = true;
 
         /// <summary>
-        /// Specifies whether the rendering is synchronized with the vertical refresh rate of the monitor. This can reduce screen tearing but may impact performance.
+        /// Whether presenting waits for the monitor's vertical refresh.
+        ///
+        /// Off, because this control paints on the UI thread: a vsynced SwapBuffers blocks the
+        /// message loop until the next vblank, so every pane on screen takes its turn waiting
+        /// and a redraw of four of them costs four vblanks of an unresponsive window. What vsync
+        /// was really doing here was pacing the self-driven redraw during a camera move -
+        /// <see cref="TargetFrameRate"/> now does that without blocking anything.
         /// </summary>
         [Category("Renderer")]
-        private bool VSync { get; set; } = true;
+        private bool VSync { get; set; } = false;
+
+        /// <summary>
+        /// Frames per second the self-driven redraw aims for while the camera is being moved.
+        ///
+        /// The redraw loop re-arms itself only while a camera button or a movement key is held
+        /// (see the end of the paint handler), and with vsync off nothing else bounds it - a
+        /// drag would otherwise redraw as fast as the GPU can retire frames, which on a small
+        /// scene is thousands of pointless frames a second and a rebuilt overlay on each one.
+        /// </summary>
+        private const int TargetFrameRate = 60;
 
         /// <summary>
         /// Whether the refresh of the renderer console is done by an external object. This is useful when there is a thread that continuously
@@ -247,16 +272,54 @@ namespace CSharp3D.Forms.Controls
 
         /// <summary>
         /// Dispose the control.
+        ///
+        /// Both the scene and the GL context are legitimately absent here: a view that was never
+        /// given a scene, and one whose host took its scene back before the tab closed, both reach
+        /// this with <see cref="Scene"/> null. Asking them to clean up anyway threw a first-chance
+        /// NullReferenceException on every close - swallowed by the catch, but the debugger still
+        /// stopped on it - so the reaching is guarded rather than the throwing caught.
         /// </summary>
         /// <param name="disposing"> Whether the control is being disposed. </param>
         protected override void Dispose(bool disposing)
         {
-            try
+            if (disposing && frameTimer != null)
             {
-                Scene.Dispose(disposing, Context);
-            } catch (Exception e)
-            {
+                frameTimer.Stop();
+                frameTimer.Dispose();
+                frameTimer = null;
+            }
 
+            // Only on the deterministic path: the finalizer must not touch the GLControl, which
+            // may already have been collected.
+            if (disposing && Scene != null && glControl != null && !glControl.IsDisposed)
+            {
+                try
+                {
+                    Scene.Dispose(true, Context);
+                }
+                catch (Exception)
+                {
+                    // A scene whose context has already gone has nothing left to give back.
+                }
+            }
+
+            // The per-context caches (uniform locations, spare GL names) die with the context.
+            if (disposing && glControl != null && !glControl.IsDisposed && glControl.IsHandleCreated)
+            {
+                try
+                {
+                    object context = glControl.Context;
+
+                    if (context != null)
+                    {
+                        Shader.ForgetUniformLocations(context);
+                        Mesh.ForgetNamePools(context);
+                    }
+                }
+                catch (Exception)
+                {
+                    // No context was ever made: nothing was cached for it.
+                }
             }
 
             base.Dispose(disposing);
@@ -358,12 +421,15 @@ namespace CSharp3D.Forms.Controls
                 return;
             }
 
-            GL.ClearColor(BackColor.R / 255f, BackColor.G / 255f, BackColor.B / 255f, BackColor.A / 255f);
-
             if (Camera == null)
                 throw new CameraNotSetException();
 
             glControl.MakeCurrent();
+
+            // After MakeCurrent: the clear colour is per-context state, and set before it went
+            // into whichever view painted last - a view with another background (the map
+            // editor's grey logical view) turned its neighbour's background grey.
+            GL.ClearColor(BackColor.R / 255f, BackColor.G / 255f, BackColor.B / 255f, BackColor.A / 255f);
 
             // Per-frame update hook (update-then-draw). Raised with the context current so
             // handlers may create/destroy scene resources before the meshes are enumerated.
@@ -380,6 +446,13 @@ namespace CSharp3D.Forms.Controls
             Matrix4 view = Camera.GetViewMatrix(this);
 
             List<Mesh> transparentMeshes = new List<Mesh>();
+
+            // The sky first, with no depth: everything after it is in front of it.
+            Skybox?.Draw(Context, view, projection, glControl.Width, glControl.Height);
+
+            // After the sky, which binds a program of its own: the meshes' per-frame uniforms
+            // go up afresh, and Shader.Use forgets which program it thinks is bound.
+            Mesh.BeginFrame(glControl.Width, glControl.Height);
 
             // This view's own meshes (grid, overlays) draw first, behind the shared scene. They
             // are always drawn as-is: a grid or a handle means the same thing in every draw mode.
@@ -402,6 +475,11 @@ namespace CSharp3D.Forms.Controls
             CulledMeshCount = 0;
             DrawnMeshCount = 0;
 
+            // Camera-distance switches (Mesh.MaxCameraDistance / MinCameraDistance) only
+            // mean something with a perspective eye; an orthographic projection has M44 == 1.
+            bool perspective = Math.Abs(projection.M44) < 1e-4f;
+            LocationVector eye = perspective ? CSharp3D.Forms.Cameras.Camera.GetLocation(view) : null;
+
             // Draw opaque meshes
             foreach (Mesh mesh in Scene.Meshes)
             {
@@ -410,6 +488,12 @@ namespace CSharp3D.Forms.Controls
                 // meshes out of the textured pane).
                 if (!mesh.IsVisibleIn(DrawMode))
                     continue;
+
+                if (eye != null && !mesh.IsInCameraRange(eye))
+                {
+                    CulledMeshCount++;
+                    continue;
+                }
 
                 if (FrustumCulling)
                 {
@@ -540,12 +624,119 @@ namespace CSharp3D.Forms.Controls
             }
 
             GL.BindVertexArray(0);
+
+            // A capture reads the frame it just drew rather than presenting it: the back buffer
+            // still holds it here, which it does not once it has been swapped.
+            if (capturing)
+            {
+                captured = ReadBackBuffer();
+                return;
+            }
+
             glControl.Context.SwapBuffers();
 
             if (shouldInvalidate)
             {
-                glControl.Invalidate();
+                ScheduleNextFrame();
             }
+        }
+
+        /// <summary>Paces the self-driven redraw; null until a camera is first moved.</summary>
+        private System.Windows.Forms.Timer frameTimer;
+
+        /// <summary>
+        /// Ask for another frame, at no more than <see cref="TargetFrameRate"/>.
+        ///
+        /// A timer rather than a straight <c>Invalidate</c> so the queue actually drains between
+        /// frames. Invalidating from inside the paint handler leaves a WM_PAINT permanently
+        /// pending, which is the case the FrameUpdate docs warn about: nothing lower-priority
+        /// than a paint - WM_TIMER included - gets a look in. Here the next paint is not posted
+        /// until the timer fires, so there is a gap for everything else, and the frame just
+        /// drawn is presented immediately rather than being held back to a vblank.
+        /// </summary>
+        private void ScheduleNextFrame()
+        {
+            if (frameTimer == null)
+            {
+                frameTimer = new System.Windows.Forms.Timer { Interval = Math.Max(1, 1000 / TargetFrameRate) };
+
+                frameTimer.Tick += (s, e) =>
+                {
+                    frameTimer.Stop();
+
+                    if (!IsDisposed && glControl != null && !glControl.IsDisposed)
+                        glControl.Invalidate();
+                };
+            }
+
+            if (!frameTimer.Enabled)
+                frameTimer.Start();
+        }
+
+        // ==================== capture ====================
+
+        private bool capturing;
+        private Bitmap captured;
+
+        /// <summary>
+        /// Draw one frame and hand it back as a bitmap instead of presenting it, for a host that
+        /// wants a picture of the scene rather than a live view of it - one that can then let go
+        /// of the scene entirely. Null if there is nothing able to draw.
+        /// </summary>
+        public Bitmap CaptureFrame()
+        {
+            if (glControl == null || DesignMode || Scene == null || Camera == null)
+                return null;
+
+            if (!IsHandleCreated || glControl.Width <= 0 || glControl.Height <= 0)
+                return null;
+
+            capturing = true;
+
+            try
+            {
+                // Refresh, not Invalidate: the frame has to be drawn before this returns.
+                glControl.Refresh();
+                return captured;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+            finally
+            {
+                capturing = false;
+                captured = null;
+            }
+        }
+
+        /// <summary>The frame just drawn, the right way up - GL counts rows from the bottom.</summary>
+        private Bitmap ReadBackBuffer()
+        {
+            int width = glControl.Width;
+            int height = glControl.Height;
+
+            var bitmap = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+
+            System.Drawing.Imaging.BitmapData data = bitmap.LockBits(
+                new Rectangle(0, 0, width, height),
+                System.Drawing.Imaging.ImageLockMode.WriteOnly,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+
+            try
+            {
+                GL.ReadBuffer(ReadBufferMode.Back);
+                GL.PixelStore(PixelStoreParameter.PackAlignment, 4);
+                GL.ReadPixels(0, 0, width, height, PixelFormat.Bgra, PixelType.UnsignedByte, data.Scan0);
+                GL.Finish();
+            }
+            finally
+            {
+                bitmap.UnlockBits(data);
+            }
+
+            bitmap.RotateFlip(RotateFlipType.RotateNoneFlipY);
+            return bitmap;
         }
 
         /// <summary>

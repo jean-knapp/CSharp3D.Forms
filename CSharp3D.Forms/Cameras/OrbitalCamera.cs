@@ -39,6 +39,30 @@ namespace CSharp3D.Forms.Cameras
         [Description("Whether to clamp the vertical rotation of the camera to 90 degrees.")]
         public bool ClampVertically { get; set; } = false;
 
+        /// <summary>
+        /// The point the camera orbits and looks at, in World units. The origin by default, which
+        /// is where it always orbited before this existed.
+        /// </summary>
+        [Category("Position")]
+        [TypeConverter(typeof(LocationVectorTypeConverter))]
+        [Description("The point the camera orbits and looks at, in World units.")]
+        public LocationVector Target { get; set; } = new LocationVector(0, 0, 0);
+
+        /// <summary>
+        /// Whether dragging with the right button alone pans (moves <see cref="Target"/> across the
+        /// view) instead of orbiting. Off by default, so every existing view keeps orbiting on any
+        /// button.
+        /// </summary>
+        [Category("Behavior")]
+        [Description("Whether a right-button drag pans instead of orbiting.")]
+        public bool PanWithRightButton { get; set; } = false;
+
+        /// <summary> A right-button-only drag while panning is enabled. </summary>
+        private bool IsPanning
+        {
+            get { return PanWithRightButton && IsRightMouseButtonDown && !IsLeftMouseButtonDown && !IsMiddleMouseButtonDown; }
+        }
+
         public OrbitalCamera()
         {
         }
@@ -58,7 +82,57 @@ namespace CSharp3D.Forms.Cameras
             Quaternion qYaw = Quaternion.FromAxisAngle(Vector3.UnitY, rotation.Y);
             Quaternion qRoll = Quaternion.FromAxisAngle(Vector3.UnitZ, rotation.Z);
 
-            return Matrix4.CreateFromQuaternion(qRoll * qPitch * qYaw) * Matrix4.CreateTranslation(location);
+            // Bring the target to the origin first, so the orbit and the look are about it.
+            Matrix4 toTarget = Matrix4.CreateTranslation(-VectorOrientation.ToGL(GetTarget(rendererControl)));
+
+            return toTarget * Matrix4.CreateFromQuaternion(qRoll * qPitch * qYaw) * Matrix4.CreateTranslation(location);
+        }
+
+        /// <summary>
+        /// The orbit target, moved by the drag in progress when panning: the view slides with the
+        /// cursor (what is under it stays under it), at the target's depth.
+        /// </summary>
+        public LocationVector GetTarget(RendererControl rendererControl)
+        {
+            if (!IsPanning || rendererControl == null || rendererControl.Height <= 0)
+                return Target;
+
+            Vector2 mouseDelta = GetMouseDelta();
+
+            Vector3 right, up;
+            GetScreenAxes(Rotation, out right, out up);
+
+            float unitsPerPixel = 2f * Distance * (float)Math.Tan(FOV * Math.PI / 360.0) / rendererControl.Height;
+            Vector3 offset = right * (mouseDelta.X * unitsPerPixel) + up * (mouseDelta.Y * unitsPerPixel);
+
+            RecenterMouse(rendererControl);
+
+            return new LocationVector(Target.X + offset.X, Target.Y + offset.Y, Target.Z + offset.Z);
+        }
+
+        /// <summary>
+        /// The screen's right and up directions in World units (X forward, Y left, Z up) for a
+        /// camera orbiting at the given rotation.
+        /// </summary>
+        public static void GetScreenAxes(RotationVector rotation, out Vector3 right, out Vector3 up)
+        {
+            double yaw = (rotation.Yaw + 180) * Math.PI / 180.0;
+            double pitch = rotation.Pitch * Math.PI / 180.0;
+
+            // From the target towards the camera, as GetLocation places it; the view looks back.
+            Vector3 toCamera = new Vector3(
+                (float)(Math.Cos(yaw) * Math.Cos(pitch)),
+                (float)(Math.Sin(yaw) * Math.Cos(pitch)),
+                (float)Math.Sin(pitch));
+            Vector3 forward = -toCamera;
+
+            right = Vector3.Cross(forward, Vector3.UnitZ);
+            if (right.LengthSquared < 1e-8f)
+                right = Vector3.Cross(forward, Vector3.UnitX);
+            right.Normalize();
+
+            up = Vector3.Cross(right, forward);
+            up.Normalize();
         }
 
         /// <summary>
@@ -72,7 +146,7 @@ namespace CSharp3D.Forms.Cameras
             var mouseDelta = GetMouseDelta();
             RotationVector rotation = Rotation;
 
-            if (IsMouseDown)
+            if (IsMouseDown && !IsPanning)
             {
                 rotation = rotation + new RotationVector(0, 2 * mouseDelta.Y * FOV / rendererControl.Height, 2 * mouseDelta.X * FOV / rendererControl.Width);
 
@@ -107,8 +181,9 @@ namespace CSharp3D.Forms.Cameras
             float y = Distance * (float)Math.Sin((rot.Yaw + 180) * Math.PI / 180f) * (float)Math.Cos((rot.Pitch) * Math.PI / 180f);
             float z = Distance * (float)Math.Sin((rot.Pitch) * Math.PI / 180f);
 
-            // Calculate the camera position
-            return new LocationVector(x, y, z);
+            // Calculate the camera position, around the target
+            LocationVector target = GetTarget(rendererControl);
+            return new LocationVector(target.X + x, target.Y + y, target.Z + z);
         }
 
         public override void MouseDown(RendererControl rendererControl, MouseButtons button)
@@ -125,6 +200,7 @@ namespace CSharp3D.Forms.Cameras
             // Center the mouse before restoring the cursor
             Cursor.Position = rendererControl.GetCenterPointInScreen();
             Cursor.Current = Cursors.Default;
+            Target = GetTarget(rendererControl);
             Rotation = GetRotation(rendererControl);
 
             base.MouseUp(rendererControl, button);

@@ -180,7 +180,7 @@ namespace CSharp3D.Forms.Controls
             {
                 for (int m = 0; m < Grids[i].Meshes.Length; m++)
                 {
-                    LineMesh mesh = Grids[i].Meshes[m];
+                    Mesh mesh = Grids[i].Meshes[m];
 
                     if (_showGrid)
                     {
