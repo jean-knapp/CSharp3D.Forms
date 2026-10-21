@@ -10,7 +10,11 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
+#if CSHARP3D_AVALONIA
+using CSharp3D.Forms.Input;
+#else
 using System.Windows.Forms;
+#endif
 
 namespace CSharp3D.Forms.Engine
 {

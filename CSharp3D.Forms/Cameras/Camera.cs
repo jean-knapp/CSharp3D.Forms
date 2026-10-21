@@ -5,7 +5,11 @@ using CSharp3D.Forms.Utils;
 using OpenTK;
 using System;
 using System.ComponentModel;
+#if CSHARP3D_AVALONIA
+using CSharp3D.Forms.Input;
+#else
 using System.Windows.Forms;
+#endif
 
 namespace CSharp3D.Forms.Cameras
 {
